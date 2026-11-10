@@ -1,13 +1,12 @@
-name: Compose Boot Image (FD + kernel + payload)
+name: GPU72 kernel and GL-GLH boot images
 
-# Composes a flashable boot image from:
+# Rebuilds the gpu72 kernel and two temporary-boot GPU payloads from:
 #   - the firmware volume committed in uefi/SILICIUM_UEFI.fd (built by the
 #     Mu-Silicium "Build and upload picasso FD" workflow, copied here manually)
 #   - the XNU kernel + ADT payload built here (macOS, xcodebuild)
 #   - BootShim / mkbootimg / DTB / FD config from uefi/mu-silicium (committed here)
 #
-# Produces boot.img ready for "fastboot boot" (or "fastboot flash boot" when the
-# payload is sized to fit the boot partition).
+# Produces 80 MiB payload images for "fastboot boot"; do not flash them.
 # iPhone userland is experimental; successful composition is not runtime qualification.
 # Pure host regressions run separately in host-checks.yml.
 
@@ -16,10 +15,6 @@ on:
     inputs:
       fast:
         description: Skip optional artifact checks for device iteration
-        type: boolean
-        default: false
-      create_data_seed:
-        description: Create the first 20 GiB seed if none is reusable (changes Data identity)
         type: boolean
         default: false
 
@@ -35,6 +30,8 @@ jobs:
   build:
     runs-on: macos-latest
     timeout-minutes: 360
+    env:
+      PICASSO_EXACT_INPUT_MANIFEST_SHA256: 76d16e3e360af107acc77a9807eacdadcac899ea9c99d88770cb90b275ab7b74
     defaults:
       run:
         shell: bash
@@ -44,11 +41,40 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: device
+          fetch-depth: 0
           persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Verify gpu72 source baseline and saved seed archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git diff --exit-code 1c9ebeb17577610ad620bb73941d27844dac0392 -- \
+            board.toml unixnu unixnu.lock upstream.rev configs drivers kits package patches scripts uefi policy
+          python3 - <<'PY'
+          import hashlib, json, subprocess
+          from pathlib import Path
+          endpoint = 'repos/tselongson/UniXNU-picasso/actions/artifacts/13604308252'
+          metadata = json.loads(subprocess.check_output(['gh', 'api', endpoint], text=True))
+          assert not metadata['expired'] and metadata['name'] == 'picasso-data-seed-481'
+          assert metadata['workflow_run']['id'] == 42448554665
+          assert metadata['workflow_run']['head_sha'] == '48597d056d2fcf289c0d6d041a87f127113e410a'
+          archive = Path('picasso-seed-481.zip')
+          with archive.open('wb') as stream:
+              subprocess.run(['gh', 'api', endpoint + '/zip'], stdout=stream, check=True)
+          assert archive.stat().st_size == 1180586
+          assert hashlib.sha256(archive.read_bytes()).hexdigest() == '2042e9d0a6d1d376aeaadfed58bde0872869d12558210d95ad1d4efa838e3fb8'
+          # Keep semantic checks; permit this exact saved manifest across recipe-only changes.
+          script = Path('scripts/picasso_linux_inputs.py')
+          old = "    require(manifest['schema'] == SCHEMA and manifest['recipe_sha256'] == recipe(tree),\n            'iOS16 Compose input recipe differs; refresh Compose on this branch')"
+          new = "    require(manifest['schema'] == SCHEMA, 'Invalid iOS16 Compose input schema')\n    exact = os.environ.get('PICASSO_EXACT_INPUT_MANIFEST_SHA256', '')\n    require(manifest['recipe_sha256'] == recipe(tree) or\n            (re.fullmatch('[0-9a-f]{64}', exact) and digest(path) == exact),\n            'Compose recipe differs from the explicitly pinned saved inputs')"
+          text = script.read_text()
+          assert text.count(old) == 1, 'Saved-seed validation hook changed'
+          script.write_text(text.replace(old, new))
+          PY
 
       - name: Check iPhone X inputs and retained kernel backend
         run: |
@@ -92,11 +118,33 @@ jobs:
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-path
 
-      - name: Build the SpringBoard inject library
+      - name: Restore and audit the exact saved 481 seed and signed UI library
         run: |
-          mkdir -p out/picasso
-          python3 scripts/build-picasso-sb-inject.py \
-            package/picasso-springboard/picasso-springboard-probe.m out/picasso/libpicasso-sb.dylib
+          python3 ./unixnu defconfig picasso_defconfig
+          python3 - <<'PY'
+          import hashlib, json, os, shutil, sys
+          from pathlib import Path
+          sys.path.insert(0, str(Path('scripts').resolve()))
+          import picasso_linux_inputs as inputs
+          tree = Path(os.environ['UNIXNU_TREE'])
+          work = Path('out/picasso')
+          saved = work / 'persistent-inputs'
+          inputs.extract(Path('picasso-seed-481.zip'), saved)
+          assert inputs.digest(saved / 'manifest.json') == os.environ['PICASSO_EXACT_INPUT_MANIFEST_SHA256']
+          checked = inputs.validate(saved, tree)
+          proof = dict(schema=inputs.SCHEMA, repository='tselongson/UniXNU-picasso',
+                       recipe_sha256=inputs.recipe(tree), producer_run_id=42448554665,
+                       producer_revision='48597d056d2fcf289c0d6d041a87f127113e410a',
+                       producer_branch='kd439-pool', producer_workflow='.github/workflows/compose-bootimg.yml',
+                       artifact_id=13604308252,
+                       artifact_sha256='2042e9d0a6d1d376aeaadfed58bde0872869d12558210d95ad1d4efa838e3fb8',
+                       exact_manifest_sha256=inputs.digest(saved / 'manifest.json'))
+          (saved / 'reuse.json').write_text(json.dumps(proof, indent=2) + '\n')
+          inputs.reuse(tree, saved.resolve(), work.resolve(), 'tselongson/UniXNU-picasso', 'kd439-pool')
+          with open(os.environ['GITHUB_ENV'], 'a') as env:
+              env.write('PICASSO_LINUX_INPUTS=' + str(saved.resolve()) + '\n')
+          print('Verified original base/Setup seed, signed UI library, OS and UUID:', checked['volume_uuid'])
+          PY
 
       - name: Prepare authenticated stock touch firmware
         run: |
@@ -153,30 +201,6 @@ jobs:
             --output "out/ipsw/$PICASSO_BACKEND_BUILD" 2>&1 | tee out/picasso/logs/actions-kernel-donor.log
           cp "out/ipsw/$PICASSO_BACKEND_BUILD/report.json" out/picasso/logs/kernel-donor.json
           echo "UNIXNU_KERNELCACHE=$PWD/out/ipsw/$PICASSO_BACKEND_BUILD/kernelcache.decompressed" >> "$GITHUB_ENV"
-
-      - name: Reuse persistent Data seed (new seed requires explicit input)
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          CREATE_DATA_SEED: ${{ inputs.create_data_seed }}
-        run: |
-          python3 ./unixnu defconfig picasso_defconfig
-          SEED_ARGS=()
-          if [ "$CREATE_DATA_SEED" = true ]; then SEED_ARGS+=(--allow-new-seed); fi
-          python3 scripts/picasso_linux_inputs.py reuse-optional --tree "$UNIXNU_TREE" \
-            --output out/picasso/persistent-inputs "${SEED_ARGS[@]}"
-          if [ -s out/picasso/persistent-inputs/reuse.json ]; then
-            echo "PICASSO_LINUX_INPUTS=$PWD/out/picasso/persistent-inputs" >> "$GITHUB_ENV"
-            # Use the signed library bound to the reused Setup seed, then rebuild
-            # its precise trust bundle. No new APFS formatting or Setup mutation.
-            python3 scripts/prepare-picasso-ui-trust.py --original out/picasso/original-static-system.bundle \
-              --library out/picasso/libpicasso-sb.dylib --output out/picasso/ui-trust.bundle
-            cp out/picasso/ui-trust.json out/picasso/logs/ui-trust.json
-          else
-            sudo "$(command -v python3)" scripts/prepare-picasso-ram-data.py \
-              --tree "$UNIXNU_TREE" --source "out/ipsw/$PICASSO_IPSW_BUILD/$PICASSO_OS_MEMBER" \
-              --output out/picasso/ram-data --config out/picasso/.config \
-              2>&1 | tee out/picasso/logs/actions-ram-data.log
-          fi
 
       - name: Build kernel + payload
         env:
@@ -285,28 +309,74 @@ jobs:
               print(f'Prelink includes {component}, start={start:#x}')
           PY
 
-      - name: Export audited iOS16 inputs for Linux builds
+      - name: Download both matching GPU addon and trust pairs
         run: |
-          python3 scripts/picasso_linux_inputs.py export --tree "$UNIXNU_TREE"
+          mkdir -p inputs/gpu72
+          BASE=https://github.com/silenzio111/UniXNU-picasso/releases/download
+          curl -fL --retry 3 "$BASE/picasso-gpu-addon-gpu72/ngpu-addon-ios16-gl-gpu72.bin" -o inputs/gpu72/ngpu-addon-ios16-gl-gpu72.bin
+          curl -fL --retry 3 "$BASE/picasso-gpu-addon-gpu72/gpu-trust.bundle" -o inputs/gpu72/gpu-trust.bundle
+          curl -fL --retry 3 "$BASE/picasso-gpu-addon-gpu72-glh/ngpu-addon-ios16-gl-gpu72-glh.bin" -o inputs/gpu72/ngpu-addon-ios16-gl-gpu72-glh.bin
+          curl -fL --retry 3 "$BASE/picasso-gpu-addon-gpu72-glh/gpu-trust-glh.bundle" -o inputs/gpu72/gpu-trust-glh.bundle
+          python3 - <<'PY'
+          import hashlib
+          from pathlib import Path
+          pins = {
+              'ngpu-addon-ios16-gl-gpu72.bin': '75618b93ca16420f71777f7ee6e733cfedee5cdf23ee3e26a6cc8221f4cead0b',
+              'gpu-trust.bundle': '27ea321d7506f6a6f82751b61a7791848ddee938b22357e33f48e136a2ecbc0b',
+              'ngpu-addon-ios16-gl-gpu72-glh.bin': '84c9db3c844f5557cd2c1de4165bb2d98fa176befafb97000b3daa278d73770f',
+              'gpu-trust-glh.bundle': 'b277d68c3951d46ad61fe3137bccbd3f1f8baf14a50a751bafdc70c15e92ed9f',
+          }
+          for name, expected in pins.items():
+              data = (Path('inputs/gpu72') / name).read_bytes()
+              assert hashlib.sha256(data).hexdigest() == expected, name
+              if name.endswith('.bin'):
+                  assert data[:8] == b'NGPUADD2', name
+              print(name, expected)
+          PY
 
-      - name: Compose boot image (BootShim + repo FD + payload as ramdisk)
+      - name: Build full gpu72 GL and GLH boot payloads with the saved Setup seed
+        env:
+          DATA_RAMDISK: ${{ github.workspace }}/device/out/picasso/persistent-inputs/setup.dbr
+          UNIQUE_CHIP_ID: 41a551c0dec0de01
+          GRID: '0'
+          WF_DROP_LOGO_HOLD: '1'
         run: |
-          python3 ./unixnu bootimg \
-            --uefi "$GITHUB_WORKSPACE/device/uefi/mu-silicium" \
-            --fd "$GITHUB_WORKSPACE/device/uefi/SILICIUM_UEFI.fd" \
-            --dtb "$GITHUB_WORKSPACE/device/uefi/mu-silicium/Resources/DTBs/picasso-topology.dtb" \
-            --ramdisk "$GITHUB_WORKSPACE/device/out/picasso/payload/payload.img" \
-            -o "$GITHUB_WORKSPACE/device/out/picasso/boot/boot.img" \
-            2>&1 | tee out/picasso/logs/bootimg.log
-          ls -lh out/picasso/boot/boot.img
+          OWNER_TRUST="$PWD/inputs/gpu72/gpu-trust.bundle" \
+            python3 scripts/build-wf-payload.py gpu72-gl inputs/gpu72/ngpu-addon-ios16-gl-gpu72.bin \
+              sheng-dpu-scanout=2 sheng-gpu-perf-index=4 sheng-gpu-gl=1 glwait=0 glhooks=1 wifi=0
+          OWNER_TRUST="$PWD/inputs/gpu72/gpu-trust-glh.bundle" \
+            python3 scripts/build-wf-payload.py gpu72-glh inputs/gpu72/ngpu-addon-ios16-gl-gpu72-glh.bin \
+              sheng-dpu-scanout=2 sheng-gpu-perf-index=4 sheng-gpu-gl=1 glwait=0 glhooks=1 wifi=0 glh=1
+          python3 - <<'PY'
+          import hashlib, json, os, subprocess
+          from pathlib import Path
+          kernel = Path('out/picasso/kernel/kernel.macho')
+          kernel_hash = hashlib.sha256(kernel.read_bytes()).hexdigest()
+          for tag in ('gpu72-gl', 'gpu72-glh'):
+              report = json.loads((Path('out') / tag / 'picasso/payload/payload.json').read_text())
+              assert report['kernel_sha256'] == kernel_hash
+              assert report['data_ramdisk_sha256'] == '4998d22158c808c90b53b7c1f8a30d021401017b2947b5df034ded70bd74cfba'
+              assert len(report['kernel_args'].encode()) <= 1000
+              assert ('glh=1' in report['kernel_args'].split()) == (tag == 'gpu72-glh')
+              print(tag, 'kernel=', kernel_hash, 'args=', len(report['kernel_args'].encode()))
+          provenance = dict(source_baseline='1c9ebeb17577610ad620bb73941d27844dac0392',
+                            build_commit=subprocess.check_output(['git','rev-parse','HEAD'], text=True).strip(),
+                            kernel_sha256=kernel_hash, hardware_tested=False,
+                            note='Rebuilt from gpu72 source; SDK/compiler differences may change the binary hash. Temporary fastboot boot images only.')
+          Path('out/picasso/kernel/gpu72-provenance.json').write_text(json.dumps(provenance, indent=2) + '\n')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write('GPU72 source baseline: `1c9ebeb`\n\nKernel SHA256: `' + kernel_hash + '`\n\nImages: gpu72-gl and gpu72-glh. Original #481 Data seed retained. Hardware test pending.\n')
+          PY
+          shasum -a 256 out/picasso/kernel/kernel.macho > out/picasso/kernel/SHA256SUMS
+          shasum -a 256 out/gpu72-gl/picasso/boot/*.img out/gpu72-glh/picasso/boot/*.img > out/picasso/kernel/BOOT-SHA256SUMS
 
       # A few MiB of packed seeds must outlive the disposable kernel artifacts.
       # If all copies become unavailable, reuse fails instead of formatting APFS.
       - name: Retain the exact Data seed independently
         uses: actions/upload-artifact@v4
         with:
-          name: picasso-data-seed-${{ github.run_number }}
-          path: device/out/picasso/linux-inputs/**
+          name: picasso-data-seed-481-${{ github.run_number }}
+          path: device/out/picasso/persistent-inputs/**
           if-no-files-found: error
           retention-days: 90
 
@@ -314,15 +384,18 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: picasso-bootimg-${{ github.run_number }}
+          name: picasso-gpu72-${{ github.run_number }}
           include-hidden-files: true
           # Keep the diagnostic kernel and exact reusable seeds. Raw audit Data
           # copies (.cdr), extracted payload trees and object files stay on runner.
           path: |
-            device/out/picasso/boot/**
+            device/out/gpu72-gl/picasso/boot/**
+            device/out/gpu72-gl/picasso/payload/*.json
+            device/out/gpu72-glh/picasso/boot/**
+            device/out/gpu72-glh/picasso/payload/*.json
             device/out/picasso/kernel/kernel.macho
             device/out/picasso/kernel/*.json
-            device/out/picasso/kernel/SHA256SUMS
+            device/out/picasso/kernel/*SHA256SUMS
             device/out/picasso/payload/*.json
             device/out/picasso/logs/**/*.log
             device/out/picasso/logs/**/*.json
@@ -333,7 +406,7 @@ jobs:
             device/out/picasso/tree/build/**/*.log
             device/out/picasso/novatek/*.json
             device/out/picasso/ram-data/*.json
-            device/out/picasso/linux-inputs/**
+            device/out/picasso/persistent-inputs/**
             device/out/picasso/.config
             !device/out/picasso/logs/**/*.files/**
             !device/out/picasso/logs/**/*.cdr
