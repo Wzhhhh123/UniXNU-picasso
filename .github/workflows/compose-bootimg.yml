@@ -286,6 +286,17 @@ jobs:
       - name: Verify CPU GOP display against the original class ABI
         if: ${{ !inputs.fast }}
         run: |
+          # The gpu72 builder added PicassoSpmi.cpp, but its verifier still
+          # lists the older archive. Keep the exact member and ABI checks.
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('scripts/check-picasso-display-artifacts.py')
+          text = path.read_text()
+          old = "'PicassoBrightness.late.o'}, 'Wrong display/state/input archive members')"
+          new = "'PicassoBrightness.late.o', 'PicassoSpmi.o'}, 'Wrong display/state/input archive members')"
+          assert text.count(old) == 1, 'Display verifier member list changed'
+          path.write_text(text.replace(old, new))
+          PY
           python3 scripts/check-picasso-display-artifacts.py --tree out/picasso/tree --work out/picasso \
             --kernelcache "$UNIXNU_KERNELCACHE" --output out/picasso/logs/display-artifacts.json
 
