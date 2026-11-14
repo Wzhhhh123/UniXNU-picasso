@@ -187,14 +187,15 @@ int stage2(void *ctx) {
 }
 
 // Stage 3: firmware. A staged MBN is parsed and hash-checked; the WLFW request order is published. The actual
-// PIL/SCM load is deliberately not faked: this tree has no secure-monitor call, and the picasso DT has no wlan PIL
-// node, so the load step reports ENOTSUP. A missing or unloadable image is a diagnostic here, not a crash; the
+// PIL/SCM load is not implemented for WLAN/MPSS. Adreno has its own GPU PAS client;
+// its existence does not provide WLAN firmware loading, ownership or recovery.
+// The load step reports ENOTSUP. A missing or unloadable image is a diagnostic here, not a crash; the
 // final stop belongs to stage 5.
 struct HandshakeContext { int unused; };
 
 int hsLoad(void *, const struct wlan_mbn *) {
-    printf("PICASSO_WLAN stage3 PIL load unavailable: no SCM/TZ call in this tree and no wlan PIL node in "
-           "picasso.dts (modem.mdt/modem_wlan_mem is the only staged modem image)\n");
+    printf("PICASSO_WLAN stage3 PIL load unavailable: no WLAN/MPSS secure-loader integration "
+           "(the GPU PAS client does not start WLAN firmware)\n");
     return WLAN_ERR_NOTSUP;
 }
 int hsRequest(void *, unsigned request, uint64_t, uint64_t) {

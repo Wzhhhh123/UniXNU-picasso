@@ -55,3 +55,73 @@ firmware/handshake fixtures under normal and sanitizer builds, and compiles the
 complete probe body for ARM64 using explicit API stand-ins. It is not an XNU SDK
 build or device qualification. About-page network waits must be diagnosed through
 configd/InterfaceNamer independently; enabling `wifid` alone cannot repair them.
+
+## gpu72-8 device checkpoint (2026-11-14)
+
+The tested GL build records source baseline `1c9ebeb17577610ad620bb73941d27844dac0392`,
+build commit `20dc3cfb2730baa5cf1cc3953eb05f7038778d29`, and kernel SHA-256
+`d9f164fdaf7bb943ca561d0f398edaacf54854bf7aeb70c2f540fe5d07d4bdea`.
+Its normal payload has `wifi=0`. The temporary `wifi-stage1` image keeps that
+kernel, Data seed, GL addon and trust cache unchanged, removes the automatic
+home gesture argument, and adds only `sheng-wlan=1`. It is a diagnostic image,
+not a WLAN implementation or a build of the source fix below.
+
+The captured `wifi-stage1-console.log` reports:
+
+```text
+PICASSO_WLAN smem error=0 partition=fb000 size=7c000 free=20..7c000 radio_started=0
+PICASSO_WLAN smp2p item=435 found=-2 parsed=-2 wlan=0
+PICASSO_WLAN smp2p item=428 found=-2 parsed=-2 wlan=0
+PICASSO_WLAN stage1 WCSS MMIO deferred: MPSS/WLFW mission mode unavailable
+PICASSO_GPU scm: is-call-avail init a0=00000000 a1=00000001 a2=00000000 a3=00000000
+PICASSO_GPU scm: std is-call-avail a0=00000000 a1=00000001
+PICASSO_GPU zap: pas init a0=00000000 a1=00000000 a2=00000000 a3=00000000
+PICASSO_GPU zap: pas mem-setup a0=00000000 a1=00000000
+PICASSO_GPU zap: pas auth-and-reset a0=00000000 a1=00000000
+```
+
+These observations disprove a blanket claim that SCM/PAS is absent or rejected
+in this build. They establish the GPU secure-load path, not WLAN mission mode.
+The empty private SMEM partition has no WLAN handshake items. PR13 still supplies
+`native_wlan_firmware_size = 0`; `hsLoad`, the QMI request/wait callbacks and the
+data/interface path remain unimplemented. A successful stage-1 static check does
+not establish a working radio. The GPU probe's PAS IDs 13 and 1 do not qualify
+the board-specific MPSS PAS ID; SMEM remote PID 1 is a different namespace.
+
+Review also found a latent interrupted-SCM argument bug in `Adreno620Cp.cpp`:
+the sixth C++ argument populated x5, so passing the resume token there left x6
+zero. The fix supplies the unused x5 argument explicitly, then passes the full
+token as the seventh argument. This follows the A6 quirk and x0=1 continuation
+in [Linux qcom_scm-smc.c](https://github.com/torvalds/linux/blob/v6.12/drivers/firmware/qcom/qcom_scm-smc.c).
+`a0=1` means an interrupted SCM call, not proof of a TrustZone rejection.
+
+`scripts/check-picasso-scm-resume.py` exercises the actual source call with five
+tokens including high 64-bit values and compiles the unmodified raw SMC shim for
+ARM64. The original call fails; the fixed call passes. The WLAN wire-reader,
+sanitizer and ARM64 probe-body checks pass. Full XNU compilation is unverified:
+this Windows checkout lacks the recorded `IOPlatformExpert.cpo.json` build
+recipe and assembled SDK build tree. The temporary device test uses the original
+kernel; it does not validate the fixed interrupted-call branch on hardware.
+
+## WiFi/SCM cloud build
+
+The `codex/picasso-wifi-scm` build carries the x6 fix and corrects the modem
+probe to use `WLAN_MPSS_PAS_ID=4`. Both checked-in Picasso DTBs identify
+`/soc/qcom,mss@4080000` as `qcom,firmware-name="modem"`, `qcom,pas-id=<4>`;
+`/soc/qcom,lpass@3000000` is ADSP, PAS 1. `check-picasso-wlan-pas.py` parses both
+DTBs to guard that distinction, and the SCM fixture executes the actual query
+expression against a recording transport. This query remains read-only and
+does not start MPSS or WLAN.
+
+Compose retains the two matching GL/GLH payloads and also produces
+`gpu72-wifi-scm`: normal GL addon/trust plus `sheng-wlan=1`. All three use the
+newly compiled kernel and the exact saved #481 Setup seed. The diagnostic
+payload retains `wifi=0` because the firmware/transport/data path described
+above is not implemented. A successful build is not a working WiFi interface.
+
+The source guard permits only the reviewed WiFi/SCM/capture files over
+`cd1066e703e7c023767dfa7be54d5e2109658087` and records their hashes. Device and
+seed geometry, iOS ABI inputs, firmware pins and GL/GLH pair hashes remain
+checked. Compose runs the SCM and WLAN host checks before building XNU; a
+Windows job tests capture reconnect/partial-write behavior separately. Kernel,
+payload and boot hashes and the build commit are recorded with the artifacts.

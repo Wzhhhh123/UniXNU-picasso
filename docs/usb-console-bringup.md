@@ -6,6 +6,30 @@ and subsequent kernel output over USB, without a screen photo.
 
 ## Host capture
 
+For an explicitly requested diagnostic command, the Windows capture script can
+send `status`, `panic-test`, or `reboot-fastboot` through the same open handle.
+It first saves incoming log bytes, waits the selected delay, attempts the
+command once, and keeps capturing across disconnect/reconnect. Partial writes
+are not retried. With no `-DeviceCommand`, it only captures logs.
+
+```powershell
+# Intentionally trigger one panic after 120 seconds of capture.
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/capture-picasso-usb-console.ps1 -Wait 180 -Duration 180 -DeviceCommand panic-test -CommandAfterSeconds 120 -Output panic-test.log
+```
+
+The existing kernel panic-reset path defaults to enabled; the GL payload selects
+`picasso_usb_reset=pshold`. It flushes the panic stream, arms and checks the IMEM
+Fastboot reason, disconnects USB and resets. Capturing on the host does not add
+this behavior to kernels lacking that path. On gpu72-8, explicit `-ConfigureLine`
+timed out in Windows `SetCommState`; default capture and the diagnostic command
+path work without changing line coding or DTR. The boot argument
+`picasso_usb_panic_test=1` only triggers inside the USB hold loop; use the console
+command for a panic test after normal iOS startup.
+
+`scripts/check-picasso-capture-command.ps1` tests the actual capture loop with a
+fake transport: no default command, durable logging before command delivery,
+and no resend after disconnect or a failed/partial write.
+
 Bulk-IN EP3 event lines and the periodic poller heartbeat are disabled by
 default. Add the kernel boot argument `picasso_usb_trace=1` to enable them for
 USB debugging. This takes effect in a newly built boot image; it is not a host

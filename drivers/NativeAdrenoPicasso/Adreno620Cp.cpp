@@ -7,12 +7,9 @@
  * (disable_tseskip), the a620 hang-detect span, the UBWC 3.0/hbb14 config
  * (SM7250's DT values), and the a650 GBIF QSB/QOS list.
  *
+ * The signed ZAP image is loaded through the GPU PAS path in loadZap().
+ * Its success is independent of MPSS/WLAN firmware startup.
  * What is deliberately absent:
- *   - ZAP. Mainline loads a620_zap.mbn through the secure PIL and then makes
- *     the CP switch out of secure mode (CP_SET_SECURE_MODE). This port has no
- *     PIL/SCM path, so the CP is left in the mode the boot chain left it in
- *     and no secure-mode packet is sent. The no-op IB below shows whether the
- *     CP runs at all; if it does not, that is the next piece.
  *   - Preemption. One ring, so a6xx_preempt_hw_init() is a no-op and no yield
  *     packet is emitted.
  *   - The SCM "GPU SMMU aperture" call that adreno_hw_init() makes on kernels
@@ -35,6 +32,7 @@
 #include "NativeAdrenoTimer.h"
 #include "NativeAdrenoUserClient.h"
 #include "AdrenoPM4.h"
+#include "../NativeWlan/WlanBoard.h"
 #include <IOKit/IODeviceMemory.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IOLib.h>
@@ -480,17 +478,19 @@ void scmProbe()
      * cmd 0x07, ARGS(1) = pas id) reads no memory and touches no GPU state. If it answers for the
      * GPU's pas id 0x0d, the PIL service is live and the wf106-wf109 hang is specific to
      * PAS_INIT_IMAGE's metadata handling; if it hangs too, the PIL service is not usable from this
-     * boot environment at all. Pas id 1 (modem on this platform) is the control. */
+     * boot environment at all. Picasso's modem is PAS 4; PAS 1 is ADSP, and
+     * SMEM remote PID 1 must not be used as the modem PAS ID. */
     {
         constexpr uint32_t kStdSipSmc64 = 0x40000000u | 0x02000000u;
         printf("PICASSO_GPU scm: calling pas-supported(13)\n");
         const ScmReply gpu = scmSipCall(kStdSipSmc64 | (0x02u << 8) | 0x07u,
             0x01u, 0x0du);
         printf("PICASSO_GPU scm: pas-supported(13) a0=%08x a1=%08x\n", gpu.a0, gpu.a1);
-        printf("PICASSO_GPU scm: calling pas-supported(1)\n");
+        printf("PICASSO_WLAN scm: calling pas-supported(%u) for MPSS\n", WLAN_MPSS_PAS_ID);
         const ScmReply modem = scmSipCall(kStdSipSmc64 | (0x02u << 8) | 0x07u,
-            0x01u, 0x01u);
-        printf("PICASSO_GPU scm: pas-supported(1) a0=%08x a1=%08x\n", modem.a0, modem.a1);
+            0x01u, WLAN_MPSS_PAS_ID);
+        printf("PICASSO_WLAN scm: pas-supported(%u) a0=%08x a1=%08x radio_started=0\n",
+            WLAN_MPSS_PAS_ID, modem.a0, modem.a1);
     }
     /* wf115 measured what happens when the AP touches the crypto engine while
      * its NoC path has no vote: the qcrypto@1de0000 register read took an
@@ -1465,7 +1465,8 @@ bool loadZap()
                 uint32_t(reply.a6), uint32_t(reply.a6 >> 32), attempt);
             if (attempt == 1)
                 dumpGic();
-            reply = scmSipCall(1u, arginfo, arg0, arg1, arg2, reply.a6);
+            /* arg3 is x5; the interrupted-call token belongs in arg6/x6. */
+            reply = scmSipCall(1u, arginfo, arg0, arg1, arg2, 0, reply.a6);
         }
         return reply;
     };

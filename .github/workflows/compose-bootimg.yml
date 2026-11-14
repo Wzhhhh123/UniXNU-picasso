@@ -1,4 +1,4 @@
-name: GPU72 kernel and GL-GLH boot images
+name: GPU72 WiFi SCM kernel and diagnostic boot images
 
 # Rebuilds the gpu72 kernel and two temporary-boot GPU payloads from:
 #   - the firmware volume committed in uefi/SILICIUM_UEFI.fd (built by the
@@ -27,6 +27,22 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  capture-host:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify capture commands do not repeat after reconnect
+        shell: powershell
+        run: ./scripts/check-picasso-capture-command.ps1 -Output out/capture-host
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: picasso-capture-host-${{ github.run_number }}
+          path: out/capture-host/**
+
   build:
     runs-on: macos-latest
     timeout-minutes: 360
@@ -52,9 +68,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          git diff --exit-code 1c9ebeb17577610ad620bb73941d27844dac0392 -- \
-            board.toml unixnu unixnu.lock upstream.rev configs drivers kits package scripts uefi policy \
-            ':(exclude)patches/picasso-native-ram-block-mode1-guard.patch'
+          python3 scripts/check-picasso-wifi-baseline.py --output out/picasso/logs/wifi-source-baseline.json
           python3 - <<'PY'
           import hashlib, json, subprocess
           from pathlib import Path
@@ -118,6 +132,12 @@ jobs:
           echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-path
+
+      - name: Check SCM resume, modem PAS identity and WLAN readers
+        run: |
+          python3 scripts/check-picasso-scm-resume.py --output out/picasso/host-checks/scm-resume
+          python3 scripts/check-picasso-wlan-pas.py --output out/picasso/host-checks/wlan-pas.json
+          python3 scripts/check-picasso-wlan.py --output out/picasso/host-checks/wlan
 
       - name: Restore and audit the exact saved 481 seed and signed UI library
         run: |
@@ -346,7 +366,7 @@ jobs:
               print(name, expected)
           PY
 
-      - name: Build full gpu72 GL and GLH boot payloads with the saved Setup seed
+      - name: Build GL, GLH and WiFi diagnostic payloads with the saved Setup seed
         env:
           DATA_RAMDISK: ${{ github.workspace }}/device/out/picasso/persistent-inputs/setup.dbr
           UNIQUE_CHIP_ID: 41a551c0dec0de01
@@ -359,28 +379,33 @@ jobs:
           OWNER_TRUST="$PWD/inputs/gpu72/gpu-trust-glh.bundle" \
             python3 scripts/build-wf-payload.py gpu72-glh inputs/gpu72/ngpu-addon-ios16-gl-gpu72-glh.bin \
               sheng-dpu-scanout=2 sheng-gpu-perf-index=4 sheng-gpu-gl=1 glwait=0 glhooks=1 wifi=0 glh=1
+          OWNER_TRUST="$PWD/inputs/gpu72/gpu-trust.bundle" \
+            python3 scripts/build-wf-payload.py gpu72-wifi-scm inputs/gpu72/ngpu-addon-ios16-gl-gpu72.bin \
+              sheng-dpu-scanout=2 sheng-gpu-perf-index=4 sheng-gpu-gl=1 glwait=0 glhooks=1 wifi=0 sheng-wlan=1
           python3 - <<'PY'
           import hashlib, json, os, subprocess
           from pathlib import Path
           kernel = Path('out/picasso/kernel/kernel.macho')
           kernel_hash = hashlib.sha256(kernel.read_bytes()).hexdigest()
-          for tag in ('gpu72-gl', 'gpu72-glh'):
+          for tag in ('gpu72-gl', 'gpu72-glh', 'gpu72-wifi-scm'):
               report = json.loads((Path('out') / tag / 'picasso/payload/payload.json').read_text())
               assert report['kernel_sha256'] == kernel_hash
               assert report['data_ramdisk_sha256'] == '4998d22158c808c90b53b7c1f8a30d021401017b2947b5df034ded70bd74cfba'
               assert len(report['kernel_args'].encode()) <= 1000
               assert ('glh=1' in report['kernel_args'].split()) == (tag == 'gpu72-glh')
+              assert ('sheng-wlan=1' in report['kernel_args'].split()) == (tag == 'gpu72-wifi-scm')
               print(tag, 'kernel=', kernel_hash, 'args=', len(report['kernel_args'].encode()))
           provenance = dict(source_baseline='1c9ebeb17577610ad620bb73941d27844dac0392',
                             build_commit=subprocess.check_output(['git','rev-parse','HEAD'], text=True).strip(),
                             kernel_sha256=kernel_hash, hardware_tested=False,
-                            note='Rebuilt from gpu72 source; SDK/compiler differences may change the binary hash. Temporary fastboot boot images only.')
+                            wifi_scm_fix=True, modem_pas_id=4,
+                            note='gpu72 plus SCM x6/PAS-ID fixes. WiFi diagnostics only; no WLAN firmware loader/data path yet. Temporary fastboot boot images only.')
           Path('out/picasso/kernel/gpu72-provenance.json').write_text(json.dumps(provenance, indent=2) + '\n')
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
-              summary.write('GPU72 source baseline: `1c9ebeb`\n\nKernel SHA256: `' + kernel_hash + '`\n\nImages: gpu72-gl and gpu72-glh. Original #481 Data seed retained. Hardware test pending.\n')
+              summary.write('GPU72 source baseline: `1c9ebeb`, with WiFi/SCM fixes.\n\nKernel SHA256: `' + kernel_hash + '`\n\nImages: gpu72-gl, gpu72-glh, gpu72-wifi-scm. Original #481 Data seed retained. WiFi networking is not implemented; hardware test pending.\n')
           PY
           shasum -a 256 out/picasso/kernel/kernel.macho > out/picasso/kernel/SHA256SUMS
-          shasum -a 256 out/gpu72-gl/picasso/boot/*.img out/gpu72-glh/picasso/boot/*.img > out/picasso/kernel/BOOT-SHA256SUMS
+          shasum -a 256 out/gpu72-gl/picasso/boot/*.img out/gpu72-glh/picasso/boot/*.img out/gpu72-wifi-scm/picasso/boot/*.img > out/picasso/kernel/BOOT-SHA256SUMS
 
       # A few MiB of packed seeds must outlive the disposable kernel artifacts.
       # If all copies become unavailable, reuse fails instead of formatting APFS.
@@ -405,6 +430,8 @@ jobs:
             device/out/gpu72-gl/picasso/payload/*.json
             device/out/gpu72-glh/picasso/boot/**
             device/out/gpu72-glh/picasso/payload/*.json
+            device/out/gpu72-wifi-scm/picasso/boot/**
+            device/out/gpu72-wifi-scm/picasso/payload/*.json
             device/out/picasso/kernel/kernel.macho
             device/out/picasso/kernel/*.json
             device/out/picasso/kernel/*SHA256SUMS
