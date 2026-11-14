@@ -209,3 +209,59 @@ partition/memory bounds, timeout quarantine propagation, and sanitizers. The
 actual local modem image also passes a full read of every nonempty MPSS segment.
 The cloud diagnostic payload now opts into this survey. Cloud and hardware
 results are recorded below after the exact resulting build is tested.
+
+#### Cloud run 11 and two matched temporary boots
+
+[Run 11](https://github.com/Wzhhhh123/UniXNU-picasso/actions/runs/43573516323)
+successfully built commit `2aeb539d75b7870465e915dac3b680d6771f44ac`.
+The firmware implementation is commit `4f8d67e`; the follow-up removes the
+unnecessary `sheng-wlan=1` from the diagnostic payload, reducing its command
+line from 1010 to 997 bytes. Run 10 built the kernel and GL/GLH images but failed
+on that command-line limit. Run 11 passed both jobs, including SDK kernel build,
+SCM/PAS/WLAN/storage/sanitizer and Windows capture checks. `fast=true` still
+skips the optional general artifact checks.
+
+- Kernel SHA-256: `fce6af0a919e61c9ff203af2a71e88abb8aa789bd7f94333b2506d381f70c71c`.
+- Kernel UUID, matched in both hardware panics: `6D0A5CDB-AFF5-3BD8-A1A0-683EFD6E222A`.
+- WiFi diagnostic image SHA-256: `e25ecf5ccff7f2a4b9b2489ca6c0ef93ea410fb299988df45ace3025666328ee`.
+- Archive SHA-256: `0029651f8a11a80b718f9f7c662b9de5b5b9401e19c2cd85779f15b000c0e56c`.
+
+With `wlan-fw-read=1`, real XNU logs report:
+
+```text
+PICASSO_WLAN storage modem rc=0 capacity=262144 first=61606 blocks=81920 readonly=1
+PICASSO_WLAN firmware rc=0 mdt=9420 phnum=35 signed=1 loads=33 files=30 payload=85409366 span=f800000 auth=not-run radio_started=0
+PICASSO_WLAN firmware modem.mdt sha256=426dbc2ff0f626c2edd2faec162fbe38e8f2d730fa806534880584f371bbf3d1 payload_bytes_unread=85409366
+```
+
+The MDT hash exactly matches the independent recovery read. XNU checks part
+sizes but does not read all 85 MiB of payload in this diagnostic; the full-part
+read was a host check. No WCSS register access, MPSS RAM write, or PAS load was
+performed by the survey. SMP2P items remain absent and `radio_started=0`.
+
+A matched local control changed only `wlan-fw-read=1` to `wlan-fw-read=0` and
+recomputed the Android image ID (21 changed bytes total). Its SHA-256 is
+`0c927c81a1afd0fa183509b63de8a874ebeef008bb0d6e7e8cd1ee79e8e00249`.
+Both images use the same kernel, normal GL addon/trust pair, Data seed, and a
+single console panic command 140 seconds after connection. Neither was flashed.
+Both returned through the installed boot relay to Fastboot about 18 seconds
+after the command, with the panic flush marker captured.
+
+Both samples initialized EAGL and logged glTexImage2D, but neither logged
+ glFlush or periodic DPU flip statistics. GPU hangcheck retries stayed zero,
+which does not establish a working desktop. No fresh user screen confirmation
+was received; GLH was not hardware-tested and no performance conclusion is made.
+
+The read-on sample produced a nested panic before stackshot export. The matched
+kernel's call site resolves to `kdp_stackshot_record_task`, `kern_stackshot.c:3451`:
+`thread wait info count mismatch while capturing snapshots for task ...`.
+The read-off sample exported 131045 bytes, CRC32 `26768d9f`, with a verified
+transport and kcdata envelope. One sample per setting cannot establish whether
+the read-on operation contributed; this remains unresolved, and the survey is
+opt-in. Text panic capture and automatic Fastboot return worked in both cases;
+complete structured capture is not claimed for the read-on case.
+
+WiFi remains unavailable. The stock MPSS node also requires XO, vdd_cx/vdd_mss
+proxy votes and AOP signaling before integrating PAS loading and firmware
+services. GLINK/QRTR/QMI/WLFW, SNOC/CE and the iOS network interface remain to be
+implemented. The successful firmware survey is a prerequisite, not radio startup.
