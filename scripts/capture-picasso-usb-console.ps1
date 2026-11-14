@@ -20,7 +20,9 @@ param(
     [switch]$Reconnect = $true,
     [string]$Output,
     [switch]$NoStdout,
-    [switch]$ConfigureLine
+    [switch]$ConfigureLine,
+    [ValidateSet('status', 'panic-test', 'reboot-fastboot')][string]$DeviceCommand,
+    [ValidateRange(0, 3600)][int]$CommandAfterSeconds = 5
 )
 
 function Get-PicassoPorts {
@@ -77,7 +79,8 @@ function Invoke-PicassoCapture {
     param(
         [string]$Port, [int]$Wait = 0, [int]$Duration = 0,
         [bool]$Reconnect = $true, [string]$Output,
-        [switch]$NoStdout, [switch]$ConfigureLine
+        [switch]$NoStdout, [switch]$ConfigureLine,
+        [string]$DeviceCommand, [int]$CommandAfterSeconds = 5
     )
     $ErrorActionPreference = 'Stop'
     if ($env:OS -ne 'Windows_NT') { throw 'This script requires Windows.' }
@@ -102,6 +105,8 @@ function Invoke-PicassoCapture {
     $lastAnnouncedDevice = $null
     $lastPortCheck = 0.0
     $captureExit = 0
+    $commandAttempted = $false
+    $receivedAny = $false
     $buffer = New-Object byte[] 65536
     $instanceLock = New-Object System.Threading.Mutex($false, 'Local\PicassoUsbLogCapture')
     $ownsLock = $false
@@ -157,7 +162,21 @@ function Invoke-PicassoCapture {
             if ($received -gt 0) {
                 # Disk is authoritative; a full preview queue never drops raw log bytes.
                 $log.Write($buffer, $received)
+                $receivedAny = $true
                 if ($null -ne $preview) { $null = $preview.Enqueue($buffer, $received) }
+            }
+            if ($DeviceCommand -and -not $commandAttempted -and $receivedAny -and
+                $null -eq $readError -and $captureClock.Elapsed.TotalSeconds -ge $CommandAfterSeconds) {
+                # Set before I/O: a partial write or reconnect must not repeat a panic/reset.
+                $commandAttempted = $true
+                Write-CaptureStatus $statusPath "Sending diagnostic command once: $DeviceCommand" $preview
+                try {
+                    $connection.SendDiagnosticCommand($DeviceCommand)
+                    Write-CaptureStatus $statusPath "Diagnostic command sent: $DeviceCommand" $preview
+                } catch {
+                    $readError = Get-CaptureError $_
+                    Write-CaptureStatus $statusPath "Diagnostic command failed; not retried: $readError" $preview
+                }
             }
             if ($captureClock.Elapsed.TotalSeconds - $lastPortCheck -ge 1) {
                 $lastPortCheck = $captureClock.Elapsed.TotalSeconds
@@ -199,4 +218,4 @@ if ($List) {
     else { 'No connected COM ports. Default capture will keep waiting.' }
     exit 0
 }
-exit (Invoke-PicassoCapture -Port $Port -Wait $Wait -Duration $Duration -Reconnect ([bool]$Reconnect) -Output $Output -NoStdout:$NoStdout -ConfigureLine:$ConfigureLine)
+exit (Invoke-PicassoCapture -Port $Port -Wait $Wait -Duration $Duration -Reconnect ([bool]$Reconnect) -Output $Output -NoStdout:$NoStdout -ConfigureLine:$ConfigureLine -DeviceCommand $DeviceCommand -CommandAfterSeconds $CommandAfterSeconds)

@@ -52,12 +52,15 @@ extern const unsigned wlan_firmware_count;
 // ---------------------------------------------------------------------------------------------------------------
 // Qualcomm ELF32 / MBN. The parser accepts both a single-file image (all segments at their p_offset in one file,
 // as in ipa_fws.elf) and the split .mdt + .b00/.b01... form used by the stock PIL loader (every program header
-// has one segment file, in header order). A signed image's program header 0 is the hash segment: PT_LOAD with
-// p_filesz == 0 and p_memsz == the hash-table size. The hash table starts immediately after the program header
-// array; each entry is a little-endian u32 length followed by a 20-byte SHA-1 digest of that segment. A table may
-// also carry one trailing self-hash entry for the table itself; verification covers the per-segment entries.
-#define WLAN_MBN_MAX_SEGMENTS 24
-#define WLAN_MBN_MAX_SIZE (64u << 20)
+// has one segment file, in header order). Qualcomm signed MDT uses p_flags[26:24] == 2 for its hash/signature
+// segment. A split MDT packs those bytes directly after the program headers. They are opaque to this parser;
+// PAS/TrustZone must authenticate them. The older synthetic length+SHA1-table fixture remains supported for
+// host regression coverage only; it is not the Qualcomm signature format. Picasso's actual modem has 35
+// headers and an 85 MiB file extent; its PT_LOAD memory ranges fit the 248 MiB MPSS reservation.
+#define WLAN_MBN_MAX_SEGMENTS 64
+#define WLAN_MBN_MAX_SIZE (256u << 20)
+#define WLAN_MBN_QCOM_HASH 0x02000000u
+#define WLAN_MBN_QCOM_TYPE_MASK 0x07000000u
 #define WLAN_MBN_HASH_LEN 20
 #define WLAN_MBN_HASH_ENTRY (4u + WLAN_MBN_HASH_LEN)
 #define WLAN_MBN_NO_HASH 0xffffffffu
@@ -77,6 +80,7 @@ struct wlan_mbn {
     uint32_t hash_offset;     // absolute offset of the hash table inside data
     uint32_t hash_bytes;      // hash segment p_memsz
     unsigned hash_count;      // number of entries in the hash table
+    unsigned qcom_signed;     // Qualcomm signature/hash blob: authentication belongs to PAS/TZ
     uint64_t payload_size;    // sum of p_filesz over all non-hash segments
     uint64_t image_extent;    // max(p_offset + p_filesz) over all segments
 };
@@ -85,12 +89,18 @@ struct wlan_mbn {
 // payload segments to be present in data, so it works for a header-only .mdt. Returns 0 or a WLAN_ERR_* value.
 int wlan_mbn_parse_header(struct wlan_mbn *out, const uint8_t *data, size_t size);
 
+// Validate only PT_LOAD memory segments (excluding the Qualcomm hash segment)
+// against a board-owned reserved region. Never performs physical memory writes.
+int wlan_mbn_memory_plan(const struct wlan_mbn *mbn, uint64_t base, uint64_t bytes,
+                         unsigned *loads, uint64_t *payload, uint64_t *span);
+
 // Parse a single-file image: header plus every segment extent inside data. Payload segments may not overlap each
 // other. Segment 0 may cover the header itself (that is how ipa_fws.elf stores its header block).
 int wlan_mbn_parse(struct wlan_mbn *out, const uint8_t *data, size_t size);
 
-// SHA-1 of every non-hash segment, compared with the hash table. Returns 0 when all digests match, -22 on a
+// Legacy fixture SHA-1 of every non-hash segment, compared with the hash table. Returns 0 when all digests match, -22 on a
 // malformed table, -5 on a digest mismatch. A valid image with no hash segment returns 0 (nothing to verify).
+// Qualcomm signed containers return -45: structural parsing does not authenticate firmware.
 int wlan_mbn_verify_hashes(const struct wlan_mbn *mbn, const uint8_t *data, size_t size);
 
 // Split form: header in mdt, one part per program header (part[0] is the header/hash segment when it has filesz).

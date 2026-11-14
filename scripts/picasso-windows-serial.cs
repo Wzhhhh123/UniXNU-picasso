@@ -1,4 +1,4 @@
-// Windows host capture only. This code never sends a device console command.
+// Windows host capture. Diagnostic commands require an explicit caller request.
 // C# 5 / .NET Framework 4.5 compatible for Windows PowerShell 5.1 Add-Type.
 using System;
 using System.ComponentModel;
@@ -76,6 +76,9 @@ namespace PicassoCapture
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern bool ReadFile(SafeFileHandle file, IntPtr data, uint length,
             out uint read, IntPtr overlapped);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool WriteFile(SafeFileHandle file, IntPtr data, uint length,
+            out uint written, IntPtr overlapped);
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern bool GetOverlappedResult(SafeFileHandle file, IntPtr overlapped,
             out uint transferred, bool wait);
@@ -237,6 +240,58 @@ namespace PicassoCapture
                     if (count > destination.Length) throw new IOException("Serial driver returned an invalid byte count");
                     if (count != 0) Marshal.Copy(request.Buffer, destination, 0, (int)count);
                     return (int)count;
+                }
+                finally
+                {
+                    if (!deferredRelease) request.Dispose();
+                }
+            }
+        }
+
+        // Uses the already-open handle: no SetCommState/DTR request and no second
+        // reader racing the capture. Never retry a partly delivered command.
+        public void SendDiagnosticCommand(string command)
+        {
+            if (command != "status" && command != "panic-test" && command != "reboot-fastboot")
+                throw new ArgumentException("Expected status, panic-test or reboot-fastboot", "command");
+            byte[] bytes = System.Text.Encoding.ASCII.GetBytes(command + "\r\n");
+            lock (gate)
+            {
+                EnsureOpen();
+                ReadRequest request = new ReadRequest(bytes.Length);
+                bool deferredRelease = false;
+                try
+                {
+                    Marshal.Copy(bytes, 0, request.Buffer, bytes.Length);
+                    lastStage = "WriteFile(" + PortName + ")";
+                    uint count;
+                    if (!WriteFile(handle, request.Buffer, (uint)bytes.Length, out count, request.Overlapped))
+                    {
+                        int error = Marshal.GetLastWin32Error();
+                        if (error != ErrorIoPending) throw new SerialStageException(lastStage, error);
+                        if (!request.Ready.WaitOne(2000))
+                        {
+                            if (!CancelIoEx(handle, request.Overlapped) &&
+                                Marshal.GetLastWin32Error() != ErrorNotFound)
+                            {
+                                error = Marshal.GetLastWin32Error();
+                                handle.Dispose();
+                                deferredRelease = true;
+                                request.ReleaseAfterCompletion();
+                                throw new SerialStageException("CancelIoEx(write deadline)", error);
+                            }
+                            if (!request.Ready.WaitOne(1000))
+                            {
+                                handle.Dispose();
+                                deferredRelease = true;
+                                request.ReleaseAfterCompletion();
+                                throw new SerialStageException("CancelIoEx write completion", ErrorSemaphoreTimeout);
+                            }
+                        }
+                    }
+                    if (!GetOverlappedResult(handle, request.Overlapped, out count, false))
+                        ThrowLastError("GetOverlappedResult(write)");
+                    if (count != bytes.Length) throw new IOException("Incomplete diagnostic command; not retried");
                 }
                 finally
                 {

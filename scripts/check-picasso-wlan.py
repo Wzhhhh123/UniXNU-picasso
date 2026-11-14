@@ -57,9 +57,29 @@ def main():
         '-mgeneral-regs-only', '-Wall', '-Wextra', '-Werror',
         '-I', str(ROOT / 'scripts/tests'), '-I', str(driver),
         '-c', str(source), '-o', str(out / 'WlanProbe.o')])
-    inputs = [driver / n for n in ('WlanProbe.cpp', 'WlanSmem.h', 'WlanBoard.h', 'WlanBoard.cpp',
+    body = re.sub(r'^#include <[^>]+>[^\n]*\n', '', (driver / 'WlanMpss.cpp').read_text(), flags=re.M)
+    source = out / 'WlanMpss.cpp'
+    source.write_text('#include "picasso-wlan-kernel-api.h"\n' + body)
+    run('mpss-arm64', [args.cxx, '-target', 'arm64-apple-ios17.0', '-std=c++17',
+        '-ffreestanding', '-fno-exceptions', '-fno-rtti', '-fno-threadsafe-statics',
+        '-mgeneral-regs-only', '-Wall', '-Wextra', '-Werror',
+        '-I', str(ROOT / 'scripts/tests'), '-I', str(driver),
+        '-c', str(source), '-o', str(out / 'WlanMpss.o')])
+    # Exercise the exact production scalar copier on misaligned destinations,
+    # short tails and BSS zeroing, including bytes outside the segment.
+    copier = body[body.index('static void storeMemory('):body.index('static int stageSegments()')]
+    (out / 'store-memory.inc').write_text(copier)
+    for sanitized in (False, True):
+        name = 'pil' + ('-sanitized' if sanitized else '')
+        exe = out / (name + ('.exe' if os.name == 'nt' else ''))
+        flags = ['-fsanitize=address' if os.name == 'nt' else '-fsanitize=address,undefined', '-fno-omit-frame-pointer'] if sanitized else []
+        run(name+'-build', [args.cxx, '-std=c++17', '-O1', '-g', '-Wall', '-Wextra', '-Werror',
+            *flags, '-I', str(driver), '-I', str(out), str(driver / 'Test/pil.cpp'), '-o', str(exe)])
+        run(name+'-run', [str(exe)])
+    inputs = [driver / n for n in ('WlanProbe.cpp', 'WlanSmem.h', 'WlanStorage.h', 'WlanBoard.h', 'WlanBoard.cpp',
                                    'WlanFirmware.h', 'WlanFirmware.c', 'Test/main.c', 'Test/Makefile')]
     inputs += [Path(__file__), ROOT / 'scripts/tests/picasso-wlan-kernel-api.h']
+    inputs += [driver / n for n in ('WlanMpss.cpp', 'WlanMpss.h', 'WlanPil.h', 'Test/pil.cpp')]
     (out / 'results.json').write_text(json.dumps(dict(passed=True, scope=__doc__, runs=runs,
         hardware_tested=False, kernel_sdk_compiled=False,
         inputs={str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest() for p in inputs}), indent=2) + '\n')

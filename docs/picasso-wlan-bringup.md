@@ -55,3 +55,245 @@ firmware/handshake fixtures under normal and sanitizer builds, and compiles the
 complete probe body for ARM64 using explicit API stand-ins. It is not an XNU SDK
 build or device qualification. About-page network waits must be diagnosed through
 configd/InterfaceNamer independently; enabling `wifid` alone cannot repair them.
+
+## gpu72-8 device checkpoint (2026-11-14)
+
+The tested GL build records source baseline `1c9ebeb17577610ad620bb73941d27844dac0392`,
+build commit `20dc3cfb2730baa5cf1cc3953eb05f7038778d29`, and kernel SHA-256
+`d9f164fdaf7bb943ca561d0f398edaacf54854bf7aeb70c2f540fe5d07d4bdea`.
+Its normal payload has `wifi=0`. The temporary `wifi-stage1` image keeps that
+kernel, Data seed, GL addon and trust cache unchanged, removes the automatic
+home gesture argument, and adds only `sheng-wlan=1`. It is a diagnostic image,
+not a WLAN implementation or a build of the source fix below.
+
+The captured `wifi-stage1-console.log` reports:
+
+```text
+PICASSO_WLAN smem error=0 partition=fb000 size=7c000 free=20..7c000 radio_started=0
+PICASSO_WLAN smp2p item=435 found=-2 parsed=-2 wlan=0
+PICASSO_WLAN smp2p item=428 found=-2 parsed=-2 wlan=0
+PICASSO_WLAN stage1 WCSS MMIO deferred: MPSS/WLFW mission mode unavailable
+PICASSO_GPU scm: is-call-avail init a0=00000000 a1=00000001 a2=00000000 a3=00000000
+PICASSO_GPU scm: std is-call-avail a0=00000000 a1=00000001
+PICASSO_GPU zap: pas init a0=00000000 a1=00000000 a2=00000000 a3=00000000
+PICASSO_GPU zap: pas mem-setup a0=00000000 a1=00000000
+PICASSO_GPU zap: pas auth-and-reset a0=00000000 a1=00000000
+```
+
+These observations disprove a blanket claim that SCM/PAS is absent or rejected
+in this build. They establish the GPU secure-load path, not WLAN mission mode.
+The empty private SMEM partition has no WLAN handshake items. PR13 still supplies
+`native_wlan_firmware_size = 0`; `hsLoad`, the QMI request/wait callbacks and the
+data/interface path remain unimplemented. A successful stage-1 static check does
+not establish a working radio. The GPU probe's PAS IDs 13 and 1 do not qualify
+the board-specific MPSS PAS ID; SMEM remote PID 1 is a different namespace.
+
+Review also found a latent interrupted-SCM argument bug in `Adreno620Cp.cpp`:
+the sixth C++ argument populated x5, so passing the resume token there left x6
+zero. The fix supplies the unused x5 argument explicitly, then passes the full
+token as the seventh argument. This follows the A6 quirk and x0=1 continuation
+in [Linux qcom_scm-smc.c](https://github.com/torvalds/linux/blob/v6.12/drivers/firmware/qcom/qcom_scm-smc.c).
+`a0=1` means an interrupted SCM call, not proof of a TrustZone rejection.
+
+`scripts/check-picasso-scm-resume.py` exercises the actual source call with five
+tokens including high 64-bit values and compiles the unmodified raw SMC shim for
+ARM64. The original call fails; the fixed call passes. The WLAN wire-reader,
+sanitizer and ARM64 probe-body checks pass. At this local checkpoint, full XNU
+compilation was unverified: the Windows checkout lacked the recorded `IOPlatformExpert.cpo.json` build
+recipe and assembled SDK build tree. The temporary device test uses the original
+kernel; it does not validate the fixed interrupted-call branch on hardware.
+
+## WiFi/SCM cloud build
+
+The `codex/picasso-wifi-scm` build carries the x6 fix and corrects the modem
+probe to use `WLAN_MPSS_PAS_ID=4`. Both checked-in Picasso DTBs identify
+`/soc/qcom,mss@4080000` as `qcom,firmware-name="modem"`, `qcom,pas-id=<4>`;
+`/soc/qcom,lpass@3000000` is ADSP, PAS 1. `check-picasso-wlan-pas.py` parses both
+DTBs to guard that distinction, and the SCM fixture executes the actual query
+expression against a recording transport. This query remains read-only and
+does not start MPSS or WLAN.
+
+Compose retains the two matching GL/GLH payloads and also produces
+`gpu72-wifi-scm`: normal GL addon/trust plus `sheng-wlan=1`. All three use the
+newly compiled kernel and the exact saved #481 Setup seed. The diagnostic
+payload retains `wifi=0` because the firmware/transport/data path described
+above is not implemented. A successful build is not a working WiFi interface.
+
+The source guard permits only the reviewed WiFi/SCM/capture files over
+`cd1066e703e7c023767dfa7be54d5e2109658087` and records their hashes. Device and
+seed geometry, iOS ABI inputs, firmware pins and GL/GLH pair hashes remain
+checked. Compose runs the SCM and WLAN host checks before building XNU; a
+Windows job tests capture reconnect/partial-write behavior separately. Kernel,
+payload and boot hashes and the build commit are recorded with the artifacts.
+
+### Cloud run 9 and hardware qualification (2026-11-14)
+
+[Run 9](https://github.com/Wzhhhh123/UniXNU-picasso/actions/runs/43566300855)
+successfully built commit `0a31138eeee778df9b79bc70782338ecca5dc181`.
+Both the macOS build and Windows capture job passed. This resolves the local
+SDK-build limitation above. The run used `fast=true`: SCM/PAS/WLAN and capture
+checks ran, while the workflow's optional general artifact checks were skipped.
+
+Verified artifacts:
+
+- Kernel SHA-256: `0e3287e995c7cdd946ed93d600cb11a4ce8591875414f95136c837f26f36a2bf`.
+- Kernel UUID: `23EB34B1-9600-368E-8A39-7AC1FD252B51`, matched in the hardware panic.
+- `gpu72-wifi-scm.img` SHA-256: `442922ce6a728b58f5ada2de9581a22c48f5e875286bc6f8eb0a0327674aedec`.
+- Artifact ZIP SHA-256: `28315a31acc615997d00a8c1237d165bcb2a0827b203e468430694e62c4cdedf`,
+  matched the GitHub artifact digest before extraction.
+
+The temporary boot returned `pas-supported(4) a0=00000000 a1=00000000`, with
+`radio_started=0`. GPU PAS init, memory setup and auth/reset all returned zero.
+The GPU's PAS-supported query also returned zero, so the raw supported-query
+value must not be treated as proof that TrustZone rejects MPSS loading. No
+interrupted SCM call occurred in this sample; the x6 continuation branch is
+covered by the host fixture, not yet exercised on hardware.
+
+A second temporary image changed only `picasso_usb_reset=pshold` to `psci` and
+the Android image ID. It retained the same kernel, Data seed and GL addon/trust
+pair. Its SHA-256 is `5fcb94d00cb78efd7966e71a5c3b7a3d8121fa5e028a495df87e2f9dbf97c787`.
+The user confirmed entry into iOS; the log records EAGL, `glTexImage2D`, `glFlush`,
+and DPU `flips=240 maps=3 mapfails=0 fallbacks=0 latch_timeouts=0`. This establishes
+that the GL/display path ran after the SCM fix, not a performance improvement
+or complete GPU qualification. GLH was built but not hardware-tested.
+
+The PSHOLD panic test exported 149,051 stackshot bytes with CRC32 `4f3fbb52` and
+completed the panic flush, but rebooted the installed older kernel instead of
+Fastboot. Its subsequent PAS 1 log distinguishes that boot from the tested PAS 4
+kernel. The user then manually returned to Fastboot. Thus an IMEM readback and
+`PANIC FLUSH COMPLETE` alone do not prove automatic Fastboot entry. See the
+[USB console notes](usb-console-bringup.md) for the reset test boundary.
+
+After the user authorized a dedicated fallback in `boot`, a Linux Fastboot relay
+was built and temporarily qualified, the existing boot partition was backed up
+and hash-verified, and the relay was installed. A final run 9 diagnostic panic
+then exported a valid stackshot and returned through that relay to Fastboot in
+about 17 seconds. The WiFi diagnostic image itself was never flashed.
+
+WiFi remains unavailable: the read-only SMEM survey still finds no WLAN SMP2P
+items and does not start the radio. The firmware loader, QMI/GLINK transport,
+SNOC data path and iOS network-interface work listed above remain required.
+
+### Real modem firmware and read-only storage path (2026-11-14)
+
+The phone's modem partition was read through temporary TWRP, mounted read-only.
+It is on UFS LUN 4, with 4096-byte logical sectors; Linux's `start=492848`
+is in 512-byte units, so the UFS start LBA is 61606. The partition is 81920
+UFS blocks (320 MiB). The whole partition SHA-256 matched between device and
+host: `1c31b4a755e503ab49b097263ac5088a6d7e2417d8886a3f76e9970fadbc3523`.
+Firmware binaries remain local and are not included in Git or cloud artifacts.
+
+The actual `modem.mdt` is 9420 bytes, SHA-256
+`426dbc2ff0f626c2edd2faec162fbe38e8f2d730fa806534880584f371bbf3d1`.
+It has 35 program headers: PH0 contains the ELF/program headers, PH1 is the
+8248-byte Qualcomm signature/hash segment (`p_flags=0x02200000`), and 33
+PT_LOAD ranges fit exactly within the DT's `[0x8c000000,0x9b800000)` reservation.
+Thirty nonempty `.bXX` files total 85,409,366 bytes; three BSS-only ranges have
+no segment file. The previous 24-header/64-MiB limits and synthetic SHA-1-table
+assumption could not describe this firmware. Parsing now recognizes the
+Qualcomm flag and packed MDT metadata; signature verification explicitly returns
+ENOTSUP until PAS authentication is integrated. Parsing is not authentication.
+
+`wlan-fw-read=1` adds a bounded read-only survey independent of legacy stage 2+.
+It checks LUN 4 readiness/capacity, the primary GPT CRC and all partition bounds,
+then reads only within the partition named `modem`. The FAT16 reader checks
+4096-byte BPB geometry, cluster ranges/cycles, mirror agreement when following
+chains, and ASCII LFN ordering/checksum (the real `image` directory uses an
+unrelated short alias). The probe reads/hashes MDT and checks each required
+segment's directory size and memory range. It does not read all payload bytes,
+write remote RAM, authenticate/start MPSS, or expose a network interface.
+
+Local host checks cover the production GPT/FAT/MDT code, the actual NativeUfs
+adapter with mocked transport, corrupt metadata, missing/truncated parts, BSS,
+partition/memory bounds, timeout quarantine propagation, and sanitizers. The
+actual local modem image also passes a full read of every nonempty MPSS segment.
+The cloud diagnostic payload now opts into this survey. Cloud and hardware
+results are recorded below after the exact resulting build is tested.
+
+#### Cloud run 11 and two matched temporary boots
+
+[Run 11](https://github.com/Wzhhhh123/UniXNU-picasso/actions/runs/43573516323)
+successfully built commit `2aeb539d75b7870465e915dac3b680d6771f44ac`.
+The firmware implementation is commit `4f8d67e`; the follow-up removes the
+unnecessary `sheng-wlan=1` from the diagnostic payload, reducing its command
+line from 1010 to 997 bytes. Run 10 built the kernel and GL/GLH images but failed
+on that command-line limit. Run 11 passed both jobs, including SDK kernel build,
+SCM/PAS/WLAN/storage/sanitizer and Windows capture checks. `fast=true` still
+skips the optional general artifact checks.
+
+- Kernel SHA-256: `fce6af0a919e61c9ff203af2a71e88abb8aa789bd7f94333b2506d381f70c71c`.
+- Kernel UUID, matched in both hardware panics: `6D0A5CDB-AFF5-3BD8-A1A0-683EFD6E222A`.
+- WiFi diagnostic image SHA-256: `e25ecf5ccff7f2a4b9b2489ca6c0ef93ea410fb299988df45ace3025666328ee`.
+- Archive SHA-256: `0029651f8a11a80b718f9f7c662b9de5b5b9401e19c2cd85779f15b000c0e56c`.
+
+With `wlan-fw-read=1`, real XNU logs report:
+
+```text
+PICASSO_WLAN storage modem rc=0 capacity=262144 first=61606 blocks=81920 readonly=1
+PICASSO_WLAN firmware rc=0 mdt=9420 phnum=35 signed=1 loads=33 files=30 payload=85409366 span=f800000 auth=not-run radio_started=0
+PICASSO_WLAN firmware modem.mdt sha256=426dbc2ff0f626c2edd2faec162fbe38e8f2d730fa806534880584f371bbf3d1 payload_bytes_unread=85409366
+```
+
+The MDT hash exactly matches the independent recovery read. XNU checks part
+sizes but does not read all 85 MiB of payload in this diagnostic; the full-part
+read was a host check. No WCSS register access, MPSS RAM write, or PAS load was
+performed by the survey. SMP2P items remain absent and `radio_started=0`.
+
+A matched local control changed only `wlan-fw-read=1` to `wlan-fw-read=0` and
+recomputed the Android image ID (21 changed bytes total). Its SHA-256 is
+`0c927c81a1afd0fa183509b63de8a874ebeef008bb0d6e7e8cd1ee79e8e00249`.
+Both images use the same kernel, normal GL addon/trust pair, Data seed, and a
+single console panic command 140 seconds after connection. Neither was flashed.
+Both returned through the installed boot relay to Fastboot about 18 seconds
+after the command, with the panic flush marker captured.
+
+Both samples initialized EAGL and logged glTexImage2D, but neither logged
+ glFlush or periodic DPU flip statistics. GPU hangcheck retries stayed zero,
+which does not establish a working desktop. No fresh user screen confirmation
+was received; GLH was not hardware-tested and no performance conclusion is made.
+
+The read-on sample produced a nested panic before stackshot export. The matched
+kernel's call site resolves to `kdp_stackshot_record_task`, `kern_stackshot.c:3451`:
+`thread wait info count mismatch while capturing snapshots for task ...`.
+The read-off sample exported 131045 bytes, CRC32 `26768d9f`, with a verified
+transport and kcdata envelope. One sample per setting cannot establish whether
+the read-on operation contributed; this remains unresolved, and the survey is
+opt-in. Text panic capture and automatic Fastboot return worked in both cases;
+complete structured capture is not claimed for the read-on case.
+
+WiFi remains unavailable. The stock MPSS node also requires XO, vdd_cx/vdd_mss
+proxy votes and AOP signaling before integrating PAS loading and firmware
+services. GLINK/QRTR/QMI/WLFW, SNOC/CE and the iOS network interface remain to be
+implemented. The successful firmware survey is a prerequisite, not radio startup.
+
+### MPSS secure loader (experimental; device validation pending)
+
+`wlan-fw-read=1` retains the read-only inventory. `=2` additionally requests AOP
+load-state, votes the DT's MPSS proxy rails and XO, runs PAS INIT/MEM_SETUP, stages
+all PT_LOAD data/BSS, and shuts down. `=3` also runs AUTH_AND_RESET and records
+SMP2P entries/crash reasons. This is a secure-loader experiment, not a working
+WiFi interface. Firmware bytes remain on the phone/local machine.
+
+The GPU and MPSS share a sleeping PIL lock across RPMh and SCM transactions.
+Both resume Qualcomm interrupted calls with the full x6 token. The modem uses
+PAS 4, the DT's fixed 0x8c000000..0x9b800000 region, and a separate 16 KiB
+metadata slot at 0x8bc20000 inside the DT's reserved_pil region. Runtime
+boot_args.physBase must be above the entire reserved area. Existing incoming
+MPSS SMP2P allocation causes a refusal to overwrite a potentially running DSP.
+
+RPMh ARC values are indices from command DB auxiliary tables, not literal
+voltage levels. XO uses lito clk-rpmh's vote 3. The version-dependent active
+TCS sequence refuses busy commands and retains timed-out commands. AOP QMP uses
+Picasso's mailbox at 0xc300000 and its resolved IPCC doorbell at 0x408000+0xc
+(client/signal 0/0). All polling is bounded; an individual EL3 call still depends
+on firmware returning. A suspended session blocks further shared PIL work.
+Proxy votes and reserved mappings are retained for the diagnostic boot, since
+there is no shared AP rail vote aggregator yet. Do not treat this as a finished
+power-management or SSR implementation.
+
+Host coverage includes malformed command DB bounds/levels, RSC v2/v3 sequences,
+busy/timeout retention, QMP negotiation failures and occupied mailboxes, exact
+production scalar staging/BSS stores, and both production x6 resume sites.
+The entire MPSS worker is ARM64-compiled against explicit host API stand-ins;
+the cloud build provides the actual XNU SDK check. The 2026-11-14 baseline
+observed XNU memory starting at 0xc007c000 and an 85,409,366-byte MPSS payload.

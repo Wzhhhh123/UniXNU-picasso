@@ -7,19 +7,24 @@
 //   4  publish the transport conclusion (integrated SNOC/CE; no PCIe link training or SDIO enumeration exists)
 //   5  stop with the honest blocker: there is no Apple-side 802.11 stack for this Qualcomm CNSS/WCN part
 // Every stage reports through native_wlan_* globals and a PICASSO_WLAN line. All work is synchronous and bounded;
-// no loop waits for hardware and no stage can block the boot monitor for more than a few MMIO accesses.
+// Legacy stages do not poll hardware. wlan-fw-read=1 inventories local firmware;
+// 2 additionally runs PAS init/setup and stages all parts, then shuts down;
+// 3 additionally authenticates/starts MPSS. WlanMpss owns the asynchronous loader.
 // Board constants and their sources are in WlanBoard.h; the pure parsers/state machines are in WlanFirmware.c.
-// Nothing here has run on hardware yet.
+// SMEM/stage 1 have run on Picasso; see docs/picasso-wlan-bringup.md for evidence.
 #include <IOKit/IOLib.h>
 #include <IOKit/IODeviceMemory.h>
 #include <IOKit/IOMemoryDescriptor.h>
 #include <libkern/c++/OSSharedPtr.h>
 #include <pexpert/pexpert.h>
 #include <string.h>
+#include <libkern/crypto/sha2.h>
+#include "WlanMpss.h"
 extern "C" {
 #include "WlanBoard.h"
 #include "WlanFirmware.h"
 #include "WlanSmem.h"
+#include "WlanStorage.h"
 }
 
 extern "C" {
@@ -46,11 +51,63 @@ void native_wlan_probe(void);
 // Firmware is supplied by the integrator (weak symbols or the setter); no vendor blob is stored in this tree.
 extern const uint8_t native_wlan_firmware[] __attribute__((weak_import));
 extern const uint32_t native_wlan_firmware_size __attribute__((weak_import));
+int native_ufs_modem_open(uint64_t *blocks) __attribute__((weak_import));
+int native_ufs_modem_read(uint64_t relative, uint32_t blocks, void *out) __attribute__((weak_import));
 }
 
 namespace {
 static const uint8_t *gFirmware;
 static size_t gFirmwareSize;
+
+// Opt-in, read-only firmware inventory. Never accesses WCSS or remote memory,
+// and never treats parsing/size checks as successful PAS authentication.
+static struct wlan_fat gFirmwareFs;
+static uint8_t gModemMdt[16384];
+static struct wlan_mbn gModemImage;
+static int firmwareRead(void *, uint64_t lba, uint32_t blocks, void *out) {
+    return native_ufs_modem_read(lba, blocks, out);
+}
+static void firmwareSurvey() {
+    int enabled = 0;
+    if (!PE_parse_boot_argn("wlan-fw-read", &enabled, sizeof enabled) || enabled < 1 || enabled > 3) return;
+    if (!native_ufs_modem_open || !native_ufs_modem_read) {
+        printf("PICASSO_WLAN firmware error=-45 storage unavailable\n"); return;
+    }
+    uint64_t blocks = 0;
+    int rc = native_ufs_modem_open(&blocks);
+    struct wlan_disk disk = {nullptr, firmwareRead, blocks};
+    struct wlan_file dir = {}, mdt = {}, part = {};
+    if (!rc) rc = wlan_fat_open(&gFirmwareFs, &disk);
+    if (!rc) rc = wlan_fat_find(&gFirmwareFs, 0, "image", &dir);
+    if (!rc && !dir.directory) rc = WLAN_ERR_INVAL;
+    if (!rc) rc = wlan_fat_find(&gFirmwareFs, dir.cluster, "modem.mdt", &mdt);
+    if (!rc && (!mdt.size || mdt.size > sizeof gModemMdt)) rc = WLAN_ERR_INVAL;
+    if (!rc) rc = wlan_fat_read(&gFirmwareFs, &mdt, 0, mdt.size, gModemMdt);
+    if (!rc) rc = wlan_mbn_parse_header(&gModemImage, gModemMdt, mdt.size);
+    unsigned loads = 0, files = 0; uint64_t payload = 0, span = 0;
+    if (!rc) rc = wlan_mbn_memory_plan(&gModemImage, WLAN_MPSS_BASE, WLAN_MPSS_SIZE, &loads, &payload, &span);
+    if (!rc && !gModemImage.qcom_signed) rc = WLAN_ERR_INVAL;
+    for (unsigned i = 0; !rc && i < gModemImage.segments; ++i) {
+        const struct wlan_mbn_segment *s = &gModemImage.seg[i];
+        if (s->type != 1 || i == gModemImage.hash_index || !s->filesz) continue;
+        char name[16]; snprintf(name, sizeof name, "modem.b%02u", i);
+        rc = wlan_fat_find(&gFirmwareFs, dir.cluster, name, &part);
+        if (!rc && (part.directory || part.size != s->filesz)) rc = WLAN_ERR_INVAL;
+        if (!rc) ++files;
+        else printf("PICASSO_WLAN firmware part=%u expected=%u found=%u error=%d\n", i, s->filesz, part.size, rc);
+    }
+    printf("PICASSO_WLAN firmware rc=%d mdt=%u phnum=%u signed=%u loads=%u files=%u payload=%llu span=%llx auth=not-run radio_started=0\n",
+        rc, mdt.size, gModemImage.segments, gModemImage.qcom_signed, loads, files,
+        (unsigned long long)payload, (unsigned long long)span);
+    if (!rc) {
+        uint8_t digest[32]; char hex[65]; static const char digits[] = "0123456789abcdef";
+        SHA256_CTX context; SHA256_Init(&context); SHA256_Update(&context, gModemMdt, mdt.size); SHA256_Final(digest, &context);
+        for (unsigned i = 0; i < 32; ++i) { hex[2*i] = digits[digest[i] >> 4]; hex[2*i+1] = digits[digest[i] & 15]; }
+        hex[64] = 0;
+        printf("PICASSO_WLAN firmware modem.mdt sha256=%s payload_bytes_unread=%llu\n", hex, (unsigned long long)payload);
+        if (enabled >= 2) native_wlan_mpss_start((unsigned)enabled, &gFirmwareFs, dir.cluster, &gModemImage);
+    }
+}
 
 struct Region {
     OSSharedPtr<IOMemoryMap> keep;
@@ -187,14 +244,15 @@ int stage2(void *ctx) {
 }
 
 // Stage 3: firmware. A staged MBN is parsed and hash-checked; the WLFW request order is published. The actual
-// PIL/SCM load is deliberately not faked: this tree has no secure-monitor call, and the picasso DT has no wlan PIL
-// node, so the load step reports ENOTSUP. A missing or unloadable image is a diagnostic here, not a crash; the
+// PIL/SCM load is not implemented for WLAN/MPSS. Adreno has its own GPU PAS client;
+// its existence does not provide WLAN firmware loading, ownership or recovery.
+// The load step reports ENOTSUP. A missing or unloadable image is a diagnostic here, not a crash; the
 // final stop belongs to stage 5.
 struct HandshakeContext { int unused; };
 
 int hsLoad(void *, const struct wlan_mbn *) {
-    printf("PICASSO_WLAN stage3 PIL load unavailable: no SCM/TZ call in this tree and no wlan PIL node in "
-           "picasso.dts (modem.mdt/modem_wlan_mem is the only staged modem image)\n");
+    printf("PICASSO_WLAN stage3 PIL load unavailable: no WLAN/MPSS secure-loader integration "
+           "(the GPU PAS client does not start WLAN firmware)\n");
     return WLAN_ERR_NOTSUP;
 }
 int hsRequest(void *, unsigned request, uint64_t, uint64_t) {
@@ -289,7 +347,7 @@ extern "C" void native_wlan_set_firmware(const uint8_t *data, size_t size) {
 // weak_import and link whether or not this driver is included.
 extern "C" void native_wlan_probe(void) {
     static bool surveyed;
-    if (!surveyed) { surveyed=true; smemSurvey(); }
+    if (!surveyed) { surveyed=true; smemSurvey(); firmwareSurvey(); }
     unsigned stage = 0;
     if (!PE_parse_boot_argn("sheng-wlan", &stage, sizeof stage) || stage < 1) return;
     if (native_wlan_stage_req) return;
