@@ -98,8 +98,8 @@ in [Linux qcom_scm-smc.c](https://github.com/torvalds/linux/blob/v6.12/drivers/f
 `scripts/check-picasso-scm-resume.py` exercises the actual source call with five
 tokens including high 64-bit values and compiles the unmodified raw SMC shim for
 ARM64. The original call fails; the fixed call passes. The WLAN wire-reader,
-sanitizer and ARM64 probe-body checks pass. Full XNU compilation is unverified:
-this Windows checkout lacks the recorded `IOPlatformExpert.cpo.json` build
+sanitizer and ARM64 probe-body checks pass. At this local checkpoint, full XNU
+compilation was unverified: the Windows checkout lacked the recorded `IOPlatformExpert.cpo.json` build
 recipe and assembled SDK build tree. The temporary device test uses the original
 kernel; it does not validate the fixed interrupted-call branch on hardware.
 
@@ -125,3 +125,51 @@ seed geometry, iOS ABI inputs, firmware pins and GL/GLH pair hashes remain
 checked. Compose runs the SCM and WLAN host checks before building XNU; a
 Windows job tests capture reconnect/partial-write behavior separately. Kernel,
 payload and boot hashes and the build commit are recorded with the artifacts.
+
+### Cloud run 9 and hardware qualification (2026-11-14)
+
+[Run 9](https://github.com/Wzhhhh123/UniXNU-picasso/actions/runs/43566300855)
+successfully built commit `0a31138eeee778df9b79bc70782338ecca5dc181`.
+Both the macOS build and Windows capture job passed. This resolves the local
+SDK-build limitation above. The run used `fast=true`: SCM/PAS/WLAN and capture
+checks ran, while the workflow's optional general artifact checks were skipped.
+
+Verified artifacts:
+
+- Kernel SHA-256: `0e3287e995c7cdd946ed93d600cb11a4ce8591875414f95136c837f26f36a2bf`.
+- Kernel UUID: `23EB34B1-9600-368E-8A39-7AC1FD252B51`, matched in the hardware panic.
+- `gpu72-wifi-scm.img` SHA-256: `442922ce6a728b58f5ada2de9581a22c48f5e875286bc6f8eb0a0327674aedec`.
+- Artifact ZIP SHA-256: `28315a31acc615997d00a8c1237d165bcb2a0827b203e468430694e62c4cdedf`,
+  matched the GitHub artifact digest before extraction.
+
+The temporary boot returned `pas-supported(4) a0=00000000 a1=00000000`, with
+`radio_started=0`. GPU PAS init, memory setup and auth/reset all returned zero.
+The GPU's PAS-supported query also returned zero, so the raw supported-query
+value must not be treated as proof that TrustZone rejects MPSS loading. No
+interrupted SCM call occurred in this sample; the x6 continuation branch is
+covered by the host fixture, not yet exercised on hardware.
+
+A second temporary image changed only `picasso_usb_reset=pshold` to `psci` and
+the Android image ID. It retained the same kernel, Data seed and GL addon/trust
+pair. Its SHA-256 is `5fcb94d00cb78efd7966e71a5c3b7a3d8121fa5e028a495df87e2f9dbf97c787`.
+The user confirmed entry into iOS; the log records EAGL, `glTexImage2D`, `glFlush`,
+and DPU `flips=240 maps=3 mapfails=0 fallbacks=0 latch_timeouts=0`. This establishes
+that the GL/display path ran after the SCM fix, not a performance improvement
+or complete GPU qualification. GLH was built but not hardware-tested.
+
+The PSHOLD panic test exported 149,051 stackshot bytes with CRC32 `4f3fbb52` and
+completed the panic flush, but rebooted the installed older kernel instead of
+Fastboot. Its subsequent PAS 1 log distinguishes that boot from the tested PAS 4
+kernel. The user then manually returned to Fastboot. Thus an IMEM readback and
+`PANIC FLUSH COMPLETE` alone do not prove automatic Fastboot entry. See the
+[USB console notes](usb-console-bringup.md) for the reset test boundary.
+
+After the user authorized a dedicated fallback in `boot`, a Linux Fastboot relay
+was built and temporarily qualified, the existing boot partition was backed up
+and hash-verified, and the relay was installed. A final run 9 diagnostic panic
+then exported a valid stackshot and returned through that relay to Fastboot in
+about 17 seconds. The WiFi diagnostic image itself was never flashed.
+
+WiFi remains unavailable: the read-only SMEM survey still finds no WLAN SMP2P
+items and does not start the radio. The firmware loader, QMI/GLINK transport,
+SNOC data path and iOS network-interface work listed above remain required.

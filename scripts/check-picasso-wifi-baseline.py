@@ -16,6 +16,7 @@ ALLOWED = {
     'scripts/capture-picasso-usb-console.ps1', 'scripts/picasso-windows-serial.cs',
     'scripts/check-picasso-scm-resume.py', 'scripts/check-picasso-capture-command.ps1',
     'scripts/check-picasso-wlan-pas.py', 'scripts/check-picasso-wifi-baseline.py',
+    'scripts/build-picasso-fastboot-relay.py', 'scripts/picasso-fastboot-init.S',
 }
 
 
@@ -33,7 +34,7 @@ def main():
                   changed=sorted(changed), sha256={name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest() for name in files})
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2) + '\n')
-    print('PASS: changes are limited to the WiFi/SCM build and diagnostics; gpu72 board/seed/ABI inputs retained')
+    print('PASS: changes are limited to WiFi/SCM diagnostics and the Fastboot relay; gpu72 board/seed/ABI inputs retained')
 
 
 if __name__ == '__main__':

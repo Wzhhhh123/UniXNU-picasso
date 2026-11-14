@@ -30,6 +30,72 @@ command for a panic test after normal iOS startup.
 fake transport: no default command, durable logging before command delivery,
 and no resend after disconnect or a failed/partial write.
 
+### Reset qualification, 2026-11-14
+
+Cloud run 9's `gpu72-wifi-scm` kernel (`0a31138`) exported a complete 149,051-byte
+stackshot, CRC32 `4f3fbb52`, during the requested panic test. The host verified
+contiguous chunks, length, CRC and the kcdata compression envelope. The log also
+verified the IMEM value `0x77665500`, panic flush completion and PSHOLD selection.
+However, the phone booted its installed older kernel rather than Fastboot. The
+user later manually entered Fastboot; that appearance must not be counted as
+an automatic reset success.
+
+Both checked-in Picasso DTBs locate the IMEM reason at `0x146ab000 + 0x65c` and
+mark PM8150 PON SID 0, peripheral `0x08`, with `qcom,store-hard-reset-reason`.
+The stock Picasso `msm-poweroff.c` also calls `qpnp_pon_set_restart_reason` for
+bootloader reset. The native code currently relies on firmware to have preset
+that PMIC state. This is a remaining reset-path dependency; a successful IMEM
+write alone does not qualify the boot target. No guessed PMIC writes were added.
+
+A reset-argument-only PSCI image booted into iOS and ran GL/DPU, confirmed by
+the user and logs. That first PSCI session was manually returned to Fastboot
+before its scheduled panic, so it does not qualify automatic panic reset.
+
+The second PSCI session did run the controlled panic (`reset begin mode=1`)
+and exported 8,517 valid stackshot bytes, CRC32 `7b08bdf8`. The user again
+reported booting the installed image and manually entering Fastboot. Neither
+PSHOLD nor PSCI alone is qualified as an automatic Fastboot solution here.
+
+### User-authorized fallback boot image
+
+`build-picasso-fastboot-relay.py` builds a separate fallback boot image from the
+locally supplied, SHA-pinned Picasso TWRP 3.6.2 recovery. It preserves its Linux
+kernel, DTB and recovery DTBO and replaces the ramdisk with a static ARM64 PID 1.
+That program waits three seconds, then invokes Linux `RESTART2("bootloader")`,
+using the vendor kernel's PMIC/IMEM reset handling. It has no block-device or
+filesystem write logic. If reboot fails, it sleeps rather than exiting PID 1
+or deliberately causing a reboot loop.
+
+The builder validates the source and output Android v2 image IDs, the ELF
+architecture/static entry point, component bounds and the 128 MiB boot limit.
+It performs no downloads or device operations. The recovery kernel is a local
+input and is not included in the repository. Example:
+
+```text
+python scripts/build-picasso-fastboot-relay.py --base PATH_TO_QUALIFIED_RECOVERY --clang PATH_TO_CLANG --output NEW_OUTPUT_DIRECTORY
+```
+
+Before any flash, back up the complete current boot partition, verify its hash
+on the device and host, and temporarily boot the relay. Flashing requires user
+authorization: the relay replaces normal boot with Fastboot; iOS is then loaded
+with `fastboot boot`. Restoring the saved boot image restores the previous boot
+contents. This fallback does not implement WiFi or repair the native PMIC path.
+
+On 2026-11-14 the relay image SHA-256 was
+`9e74fd81cd197738191d22a664ece2dcd2917c8eb27f29e56dc809fdecb22122`
+(54,808,576 bytes). Its temporary boot returned to Fastboot in about 13 seconds.
+After explicit user authorization, it was flashed to `boot`; a normal reboot
+also returned to Fastboot. The prior 128 MiB boot partition was read through
+temporary recovery and its device/host SHA-256 matched
+`d46f7bd04e8007931a74a637355132feb50788c3c23232fe70b59507929d96e7`.
+
+The complete path was then tested with the unmodified cloud run 9 WiFi/SCM
+diagnostic image using temporary `fastboot boot` and PSHOLD reset. The command
+was sent at 15:17:46 CST, the 8,488-byte stackshot validated with CRC32
+`f76cfbff`, and Fastboot reappeared at 15:18:03 CST. Thus the measured recovery
+path is XNU panic/flush -> installed Linux relay -> Fastboot. It depends on the
+relay remaining in `boot`; it is not a fix to the XNU PMIC reset implementation.
+
 Bulk-IN EP3 event lines and the periodic poller heartbeat are disabled by
 default. Add the kernel boot argument `picasso_usb_trace=1` to enable them for
 USB debugging. This takes effect in a newly built boot image; it is not a host
