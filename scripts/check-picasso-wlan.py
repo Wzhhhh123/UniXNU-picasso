@@ -57,7 +57,7 @@ def main():
         '-mgeneral-regs-only', '-Wall', '-Wextra', '-Werror',
         '-I', str(ROOT / 'scripts/tests'), '-I', str(driver),
         '-c', str(source), '-o', str(out / 'WlanProbe.o')])
-    inputs = [driver / n for n in ('WlanProbe.cpp', 'WlanSmem.h', 'WlanBoard.h', 'WlanBoard.cpp',
+    inputs = [driver / n for n in ('WlanProbe.cpp', 'WlanSmem.h', 'WlanStorage.h', 'WlanBoard.h', 'WlanBoard.cpp',
                                    'WlanFirmware.h', 'WlanFirmware.c', 'Test/main.c', 'Test/Makefile')]
     inputs += [Path(__file__), ROOT / 'scripts/tests/picasso-wlan-kernel-api.h']
     (out / 'results.json').write_text(json.dumps(dict(passed=True, scope=__doc__, runs=runs,

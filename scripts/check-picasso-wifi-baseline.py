@@ -17,6 +17,11 @@ ALLOWED = {
     'scripts/check-picasso-scm-resume.py', 'scripts/check-picasso-capture-command.ps1',
     'scripts/check-picasso-wlan-pas.py', 'scripts/check-picasso-wifi-baseline.py',
     'scripts/build-picasso-fastboot-relay.py', 'scripts/picasso-fastboot-init.S',
+    'drivers/NativeUfs/NativeUfs.cpp', 'drivers/NativeWlan/WlanStorage.h',
+    'drivers/NativeWlan/WlanFirmware.c', 'drivers/NativeWlan/WlanFirmware.h',
+    'drivers/NativeWlan/Test/storage.c', 'scripts/check-picasso-wlan-storage.py',
+    'scripts/check-picasso-wlan.py', 'scripts/tests/picasso-wlan-kernel-api.h',
+    'scripts/tests/picasso-wlan-storage-adapter.cpp',
 }
 
 

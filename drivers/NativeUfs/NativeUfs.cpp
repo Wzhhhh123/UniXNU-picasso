@@ -1168,6 +1168,78 @@ static uint32_t be32w (const uint8_t *at)
 
 }
 
+// Firmware is read from the named modem partition on Picasso's UFS LUN 4.
+// Separate GPT scratch and publication state keep this out of userdata/store
+// layout state. All commands share the existing host lock and timeout quarantine.
+#include "../NativeWlan/WlanStorage.h"
+namespace {
+static unsigned gModemState;
+static struct wlan_partition gModemPartition;
+static int modemLunRead(void *, uint64_t lba, uint32_t blocks, void *out) {
+  return hostRead4k(4, lba, blocks, out) == kIOReturnSuccess ? 0 : -5;
+}
+static int modemCapacity(uint64_t *blocks) {
+  if (!gHost.lock) return -6;
+  IOLockLock(gHost.lock);
+  int rc = -6;
+  if (gHost.ready && !gHost.poisoned) {
+    uint8_t tur[6] = {0}; uint32_t scsi = 0;
+    IOReturn status = hostScsi(4, tur, sizeof tur, false, 0, 200000, &scsi);
+    // Clear one power-on UNIT ATTENTION. No transport retry/reset.
+    if (status == kIOReturnNotReady && scsi == 2 && (gRootDiagnostic.sense >> 16) == 6)
+      status = hostScsi(4, tur, sizeof tur, false, 0, 200000, &scsi);
+    if (status == kIOReturnSuccess) {
+      uint8_t capacity[10] = {0x25};
+      status = hostScsi(4, capacity, sizeof capacity, true, 8, 200000, &scsi);
+      if (status == kIOReturnSuccess) {
+        uint32_t last = loadBe32(gHost.virt + kDataOffset);
+        uint32_t bytes = loadBe32(gHost.virt + kDataOffset + 4);
+        if (bytes == 4096 && last != UINT32_MAX) { *blocks = (uint64_t)last + 1; rc = 0; }
+        else rc = -22;
+      }
+    }
+    if (status != kIOReturnSuccess) rc = -5;
+    IOLog("PICASSO_WLAN storage lun=4 capacity_rc=%d scsi=%x sense=%x\n", rc, scsi, gRootDiagnostic.sense);
+  }
+  IOLockUnlock(gHost.lock);
+  return rc;
+}
+}
+extern "C" int native_ufs_modem_open(uint64_t *blocks);
+extern "C" int native_ufs_modem_read(uint64_t relative, uint32_t blocks, void *out);
+extern "C" int native_ufs_modem_open(uint64_t *blocks) {
+  if (!blocks) return -22;
+  *blocks = 0;
+  unsigned expected = 0;
+  if (!__atomic_compare_exchange_n(&gModemState, &expected, 1, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+    if (expected != 2) return -6;
+    *blocks = gModemPartition.blocks; return 0;
+  }
+  uint64_t capacity = 0;
+  int rc = modemCapacity(&capacity);
+  uint8_t *scratch = nullptr;
+  if (!rc) {
+    scratch = static_cast<uint8_t *>(IOMalloc(16384));
+    if (!scratch) rc = -12;
+  }
+  if (!rc) {
+    struct wlan_disk disk = {nullptr, modemLunRead, capacity};
+    rc = wlan_modem_partition(&disk, scratch, &gModemPartition);
+  }
+  if (scratch) IOFree(scratch, 16384);
+  IOLog("PICASSO_WLAN storage modem rc=%d capacity=%llu first=%llu blocks=%llu readonly=1\n", rc,
+        (unsigned long long)capacity, (unsigned long long)gModemPartition.first,
+        (unsigned long long)gModemPartition.blocks);
+  __atomic_store_n(&gModemState, rc ? 3u : 2u, __ATOMIC_RELEASE);
+  if (!rc) *blocks = gModemPartition.blocks;
+  return rc;
+}
+extern "C" int native_ufs_modem_read(uint64_t relative, uint32_t blocks, void *out) {
+  if (__atomic_load_n(&gModemState, __ATOMIC_ACQUIRE) != 2) return -6;
+  if (!out || !blocks || relative >= gModemPartition.blocks || blocks > gModemPartition.blocks - relative) return -22;
+  return modemLunRead(nullptr, gModemPartition.first + relative, blocks, out);
+}
+
 // ---- Persistent Data store window (sheng-data-persist) ----------------------------------------------------------
 // The only part of this driver that ever writes. The consumer (NativeRamBlock's overlay) asks for a window of the given
 // size at the END of the userdata partition. Mode 1 (boot argument sheng-data-persist=1) only reads: it proves the window and

@@ -73,7 +73,13 @@ def main():
         assert modem['qcom,firmware-name'] == b'modem\0'
         assert modem['qcom,pas-id'] == struct.pack('>I', declared)
         assert declared == 4 and adsp['qcom,pas-id'] == struct.pack('>I', 1)
-        reports.append(dict(file=name, sha256=hashlib.sha256(data).hexdigest(), modem_pas=declared, adsp_pas=1))
+        region = tree['/reserved-memory/modem_wlan_region@8c000000']
+        assert modem['memory-region'] == region['phandle']
+        base = int(re.search(r'^#define WLAN_MPSS_BASE (0x[0-9a-f]+)ULL$', header, re.M)[1], 16)
+        size = int(re.search(r'^#define WLAN_MPSS_SIZE (0x[0-9a-f]+)ULL$', header, re.M)[1], 16)
+        assert region['reg'] == struct.pack('>QQ', base, size)
+        reports.append(dict(file=name, sha256=hashlib.sha256(data).hexdigest(), modem_pas=declared,
+                            adsp_pas=1, modem_base=base, modem_size=size))
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(dict(passed=True, hardware_tested=False, dtbs=reports), indent=2) + '\n')
     print('PASS: both Picasso DTBs identify MPSS as PAS 4; PAS 1 is ADSP')

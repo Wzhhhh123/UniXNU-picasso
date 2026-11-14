@@ -87,6 +87,8 @@ enum wlan_transport {
 // is ADSP with PAS ID 1. These IDs are unrelated to the SMP2P remote PID.
 // scripts/check-picasso-wlan-pas.py checks these facts directly from the DTB.
 #define WLAN_MPSS_PAS_ID 4u
+#define WLAN_MPSS_BASE 0x8c000000ULL
+#define WLAN_MPSS_SIZE 0x0f800000ULL
 
 // IRQs. interrupts = <0 0x84 4, 0 0x51 4, 0 0x19f 4, 0 0x1a0 4, 0 0x1a1 4, 0 0x56 4, 0 0x5e 4, 0 0x60 4,
 // 0 0x52 4, 0 0x77 4, 0 0x78 4, 0 0x57 4> (picasso.dts:7305). All are GIC_SPI, level high; these are the raw

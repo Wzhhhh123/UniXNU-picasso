@@ -173,3 +173,39 @@ about 17 seconds. The WiFi diagnostic image itself was never flashed.
 WiFi remains unavailable: the read-only SMEM survey still finds no WLAN SMP2P
 items and does not start the radio. The firmware loader, QMI/GLINK transport,
 SNOC data path and iOS network-interface work listed above remain required.
+
+### Real modem firmware and read-only storage path (2026-11-14)
+
+The phone's modem partition was read through temporary TWRP, mounted read-only.
+It is on UFS LUN 4, with 4096-byte logical sectors; Linux's `start=492848`
+is in 512-byte units, so the UFS start LBA is 61606. The partition is 81920
+UFS blocks (320 MiB). The whole partition SHA-256 matched between device and
+host: `1c31b4a755e503ab49b097263ac5088a6d7e2417d8886a3f76e9970fadbc3523`.
+Firmware binaries remain local and are not included in Git or cloud artifacts.
+
+The actual `modem.mdt` is 9420 bytes, SHA-256
+`426dbc2ff0f626c2edd2faec162fbe38e8f2d730fa806534880584f371bbf3d1`.
+It has 35 program headers: PH0 contains the ELF/program headers, PH1 is the
+8248-byte Qualcomm signature/hash segment (`p_flags=0x02200000`), and 33
+PT_LOAD ranges fit exactly within the DT's `[0x8c000000,0x9b800000)` reservation.
+Thirty nonempty `.bXX` files total 85,409,366 bytes; three BSS-only ranges have
+no segment file. The previous 24-header/64-MiB limits and synthetic SHA-1-table
+assumption could not describe this firmware. Parsing now recognizes the
+Qualcomm flag and packed MDT metadata; signature verification explicitly returns
+ENOTSUP until PAS authentication is integrated. Parsing is not authentication.
+
+`wlan-fw-read=1` adds a bounded read-only survey independent of legacy stage 2+.
+It checks LUN 4 readiness/capacity, the primary GPT CRC and all partition bounds,
+then reads only within the partition named `modem`. The FAT16 reader checks
+4096-byte BPB geometry, cluster ranges/cycles, mirror agreement when following
+chains, and ASCII LFN ordering/checksum (the real `image` directory uses an
+unrelated short alias). The probe reads/hashes MDT and checks each required
+segment's directory size and memory range. It does not read all payload bytes,
+write remote RAM, authenticate/start MPSS, or expose a network interface.
+
+Local host checks cover the production GPT/FAT/MDT code, the actual NativeUfs
+adapter with mocked transport, corrupt metadata, missing/truncated parts, BSS,
+partition/memory bounds, timeout quarantine propagation, and sanitizers. The
+actual local modem image also passes a full read of every nonempty MPSS segment.
+The cloud diagnostic payload now opts into this survey. Cloud and hardware
+results are recorded below after the exact resulting build is tested.

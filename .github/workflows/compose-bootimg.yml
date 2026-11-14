@@ -138,6 +138,7 @@ jobs:
           python3 scripts/check-picasso-scm-resume.py --output out/picasso/host-checks/scm-resume
           python3 scripts/check-picasso-wlan-pas.py --output out/picasso/host-checks/wlan-pas.json
           python3 scripts/check-picasso-wlan.py --output out/picasso/host-checks/wlan
+          python3 scripts/check-picasso-wlan-storage.py --output out/picasso/host-checks/wlan-storage
 
       - name: Restore and audit the exact saved 481 seed and signed UI library
         run: |
@@ -381,7 +382,7 @@ jobs:
               sheng-dpu-scanout=2 sheng-gpu-perf-index=4 sheng-gpu-gl=1 glwait=0 glhooks=1 wifi=0 glh=1
           OWNER_TRUST="$PWD/inputs/gpu72/gpu-trust.bundle" \
             python3 scripts/build-wf-payload.py gpu72-wifi-scm inputs/gpu72/ngpu-addon-ios16-gl-gpu72.bin \
-              sheng-dpu-scanout=2 sheng-gpu-perf-index=4 sheng-gpu-gl=1 glwait=0 glhooks=1 wifi=0 sheng-wlan=1
+              sheng-dpu-scanout=2 sheng-gpu-perf-index=4 sheng-gpu-gl=1 glwait=0 glhooks=1 wifi=0 sheng-wlan=1 wlan-fw-read=1
           python3 - <<'PY'
           import hashlib, json, os, subprocess
           from pathlib import Path
@@ -399,7 +400,8 @@ jobs:
                             build_commit=subprocess.check_output(['git','rev-parse','HEAD'], text=True).strip(),
                             kernel_sha256=kernel_hash, hardware_tested=False,
                             wifi_scm_fix=True, modem_pas_id=4,
-                            note='gpu72 plus SCM x6/PAS-ID fixes. WiFi diagnostics only; no WLAN firmware loader/data path yet. Temporary fastboot boot images only.')
+                            wifi_firmware_readonly=True,
+                            note='gpu72 plus SCM fixes and read-only modem GPT/FAT/MDT inventory. No MPSS secure load or WLAN data path yet. Temporary fastboot boot images only.')
           Path('out/picasso/kernel/gpu72-provenance.json').write_text(json.dumps(provenance, indent=2) + '\n')
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
               summary.write('GPU72 source baseline: `1c9ebeb`, with WiFi/SCM fixes.\n\nKernel SHA256: `' + kernel_hash + '`\n\nImages: gpu72-gl, gpu72-glh, gpu72-wifi-scm. Original #481 Data seed retained. WiFi networking is not implemented; hardware test pending.\n')

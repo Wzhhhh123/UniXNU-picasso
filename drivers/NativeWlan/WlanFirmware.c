@@ -113,7 +113,7 @@ static int mbn_read_header(struct wlan_mbn *out, const uint8_t *data, size_t siz
     if (data[0] != 0x7f || data[1] != 'E' || data[2] != 'L' || data[3] != 'F') return WLAN_ERR_INVAL;
     // ELFCLASS32, ELFDATA2LSB, EV_CURRENT. The PIL images on this target are 32-bit little-endian.
     if (data[4] != 1 || data[5] != 1 || data[6] != 1) return WLAN_ERR_INVAL;
-    if (rd16(data + 16) != 2) return WLAN_ERR_INVAL;   // ET_EXEC
+    if (rd16(data + 16) != 2 || rd32(data + 20) != 1) return WLAN_ERR_INVAL;   // ET_EXEC, EV_CURRENT
     const uint16_t machine = rd16(data + 18);
     if (machine != 40 && machine != 164) return WLAN_ERR_INVAL;   // EM_ARM, EM_HEXAGON
     const uint32_t phoff = rd32(data + 28);
@@ -132,9 +132,24 @@ static int mbn_read_header(struct wlan_mbn *out, const uint8_t *data, size_t siz
         s->filesz = rd32(p + 16); s->memsz = rd32(p + 20); s->flags = rd32(p + 24); s->align = rd32(p + 28);
         if ((uint64_t)s->offset + s->filesz > 0xffffffffULL) return WLAN_ERR_INVAL;
     }
-    // Hash segment convention: program header 0 is PT_LOAD with no file bytes and a non-zero memory size.
+    // Qualcomm MDT marks its signed hash segment in p_flags, independently of
+    // p_type. Split MDT packs it after the ELF/program headers (not p_offset).
+    for (unsigned i = 0; i < phnum; ++i) {
+        const struct wlan_mbn_segment *s = &out->seg[i];
+        if ((s->flags & WLAN_MBN_QCOM_TYPE_MASK) != WLAN_MBN_QCOM_HASH) continue;
+        if (out->qcom_signed || !s->filesz) return WLAN_ERR_INVAL;
+        const uint64_t header_end = (uint64_t)phoff + (uint64_t)phnum * 32u;
+        uint64_t at = s->offset;
+        if (size == header_end + s->filesz) at = header_end;
+        if (at < header_end || at + s->filesz > size) return WLAN_ERR_INVAL;
+        out->qcom_signed = 1;
+        out->hash_index = i;
+        out->hash_offset = (uint32_t)at;
+        out->hash_bytes = s->filesz;
+    }
+    // Legacy synthetic SHA-1 table format. This is NOT Qualcomm authentication.
     // The hash table is stored immediately after the program header array.
-    if (out->seg[0].type == 1 && out->seg[0].filesz == 0 && out->seg[0].memsz > 0) {
+    if (!out->qcom_signed && out->seg[0].type == 1 && out->seg[0].filesz == 0 && out->seg[0].memsz > 0) {
         const uint64_t at = (uint64_t)phoff + (uint64_t)phnum * 32u;
         if (at + out->seg[0].memsz > size) return WLAN_ERR_INVAL;
         if (out->seg[0].memsz % WLAN_MBN_HASH_ENTRY) return WLAN_ERR_INVAL;
@@ -150,7 +165,7 @@ static int mbn_read_header(struct wlan_mbn *out, const uint8_t *data, size_t siz
     }
     for (unsigned i = 0; i < phnum; ++i) {
         const struct wlan_mbn_segment *s = &out->seg[i];
-        if (i != out->hash_index) out->payload_size += s->filesz;
+        if (i != out->hash_index && (!out->qcom_signed || s->type == 1)) out->payload_size += s->filesz;
         const uint64_t end = (uint64_t)s->offset + s->filesz;
         if (end > out->image_extent) out->image_extent = end;
     }
@@ -184,7 +199,7 @@ int wlan_mbn_parse(struct wlan_mbn *out, const uint8_t *data, size_t size) {
         }
     }
     // In a signed image the payload starts after the hash table. Segment 0 may be the header block itself.
-    if (out->hash_index != WLAN_MBN_NO_HASH) {
+    if (out->hash_index != WLAN_MBN_NO_HASH && !out->qcom_signed) {
         const uint64_t hash_end = (uint64_t)out->hash_offset + out->hash_bytes;
         for (unsigned i = 1; i < out->segments; ++i)
             if (out->seg[i].filesz && out->seg[i].offset < hash_end) return WLAN_ERR_INVAL;
@@ -194,6 +209,7 @@ int wlan_mbn_parse(struct wlan_mbn *out, const uint8_t *data, size_t size) {
 
 int wlan_mbn_verify_hashes(const struct wlan_mbn *mbn, const uint8_t *data, size_t size) {
     if (!mbn || !data) return WLAN_ERR_INVAL;
+    if (mbn->qcom_signed) return WLAN_ERR_NOTSUP; // No host signature/authentication claim.
     if (mbn->hash_index == WLAN_MBN_NO_HASH) return 0;   // unsigned image: nothing to verify
     if (mbn->hash_index != 0) return WLAN_ERR_INVAL;
     if ((uint64_t)mbn->hash_offset + mbn->hash_bytes > size) return WLAN_ERR_INVAL;
@@ -218,7 +234,9 @@ int wlan_mbn_parse_split(struct wlan_mbn *out, const uint8_t *mdt, size_t mdt_si
     if (!parts || !part_sizes || nparts < out->segments) return WLAN_ERR_INVAL;
     for (unsigned i = 0; i < out->segments; ++i) {
         const struct wlan_mbn_segment *s = &out->seg[i];
+        if (out->qcom_signed && (i == out->hash_index || s->type != 1)) continue;
         if (part_sizes[i] < s->filesz) return WLAN_ERR_INVAL;
+        if (out->qcom_signed && part_sizes[i] != s->filesz) return WLAN_ERR_INVAL;
         if (s->filesz && !parts[i]) return WLAN_ERR_INVAL;
         // Some vendor .mdt files still contain the first segments (ipa_fws.mdt is b00+b01). When the bytes are
         // present in the mdt, they must agree with the split part.
@@ -231,6 +249,7 @@ int wlan_mbn_parse_split(struct wlan_mbn *out, const uint8_t *mdt, size_t mdt_si
 int wlan_mbn_verify_hashes_split(const struct wlan_mbn *mbn, const uint8_t *const *parts,
                                  const size_t *part_sizes, unsigned nparts) {
     if (!mbn || !parts || !part_sizes) return WLAN_ERR_INVAL;
+    if (mbn->qcom_signed) return WLAN_ERR_NOTSUP;
     if (mbn->hash_index == WLAN_MBN_NO_HASH) return 0;
     if (mbn->hash_index != 0 || nparts < mbn->segments) return WLAN_ERR_INVAL;
     if (mbn->hash_count < mbn->segments - 1) return WLAN_ERR_INVAL;
@@ -245,6 +264,31 @@ int wlan_mbn_verify_hashes_split(const struct wlan_mbn *mbn, const uint8_t *cons
         if (memcmp(digest, entry + 4, WLAN_MBN_HASH_LEN)) return WLAN_ERR_IO;
     }
     return 0;
+}
+
+int wlan_mbn_memory_plan(const struct wlan_mbn *mbn, uint64_t base, uint64_t bytes,
+                         unsigned *loads, uint64_t *payload, uint64_t *span) {
+    if (!mbn || !loads || !payload || !span || !bytes || base > UINT64_MAX - bytes ||
+        !mbn->segments || mbn->segments > WLAN_MBN_MAX_SEGMENTS) return WLAN_ERR_INVAL;
+    *loads = 0; *payload = 0; *span = 0;
+    for (unsigned i = 0; i < mbn->segments; ++i) {
+        const struct wlan_mbn_segment *s = &mbn->seg[i];
+        if (s->type != 1 || i == mbn->hash_index) continue;
+        if (s->filesz > s->memsz) return WLAN_ERR_INVAL;
+        if (!s->memsz) continue;
+        if (s->filesz > s->memsz || s->paddr < base ||
+            (uint64_t)s->paddr + s->memsz > base + bytes) return WLAN_ERR_INVAL;
+        for (unsigned j = 0; j < i; ++j) {
+            const struct wlan_mbn_segment *p = &mbn->seg[j];
+            if (p->type != 1 || j == mbn->hash_index || !p->memsz) continue;
+            if ((uint64_t)s->paddr < (uint64_t)p->paddr + p->memsz &&
+                (uint64_t)p->paddr < (uint64_t)s->paddr + s->memsz) return WLAN_ERR_INVAL;
+        }
+        ++*loads; *payload += s->filesz;
+        uint64_t end = (uint64_t)s->paddr + s->memsz - base;
+        if (end > *span) *span = end;
+    }
+    return *loads ? 0 : WLAN_ERR_INVAL;
 }
 
 // ---------------------------------------------------------------------------------------------------------------
