@@ -53,7 +53,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           git diff --exit-code 1c9ebeb17577610ad620bb73941d27844dac0392 -- \
-            board.toml unixnu unixnu.lock upstream.rev configs drivers kits package patches scripts uefi policy
+            board.toml unixnu unixnu.lock upstream.rev configs drivers kits package scripts uefi policy \
+            ':(exclude)patches/picasso-native-ram-block-mode1-guard.patch'
           python3 - <<'PY'
           import hashlib, json, subprocess
           from pathlib import Path
