@@ -124,7 +124,7 @@
 +      if (native_data_persist_gpt || !native_ufs_store_open(persist::windowBlocks(pages), &first, &why)) {
          native_data_persist_state = 4;
          IOLog("NativeRamBlock: persistent store refused: %s\n", why);
-@@ -101,8 +154,20 @@
+@@ -101,8 +154,39 @@
          overlayBits = static_cast<uint8_t *>(IOMallocZero(bb * persist::kBlock));
          stage = static_cast<uint8_t *>(IOMallocZero(kStagePages * persist::kBlock));
 -        StoreOps ops;
@@ -344,7 +344,7 @@
  // An overlay is only ever applied on top of the exact seed it was made against. A window that holds no overlay of this seed (blank,
 @@ -69,8 +69,13 @@
  enum class Open { Resumed, Fresh, Blank, Kept, Failed };
-
+ 
 +enum class BlankScan { NotRun, Zero, Nonzero, ReadFailed, NoBuffer };
 +
  struct Overlay {
@@ -355,7 +355,7 @@
 +  uint64_t scannedBlocks = 0, scanBlock = 0;
 +  uint32_t scanOffset = 0, scanCrc = 0;
    int header = -1;                 // checkHeader result at open
-
+ 
 @@ -80,7 +85,9 @@
    // overlay is initialised only with `reset` (bitmap first, header last, so a tear leaves no valid header), and kept as it is
    // without (Kept). `reset` also drops this seed's own overlay.
