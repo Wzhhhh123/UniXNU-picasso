@@ -89,6 +89,11 @@ enum wlan_transport {
 #define WLAN_MPSS_PAS_ID 4u
 #define WLAN_MPSS_BASE 0x8c000000ULL
 #define WLAN_MPSS_SIZE 0x0f800000ULL
+// Within the DT's no-map reserved_pil_mem_region@8bc17400 (ends 0x8c000000).
+// Separate from GPU ZAP metadata at 0x8bc18000..0x8bc1a000. Fixed reservation;
+// never returned to XNU's allocator. The loader also checks boot_args.physBase.
+#define WLAN_MPSS_METADATA_BASE 0x8bc20000ULL
+#define WLAN_MPSS_METADATA_SIZE 0x4000ULL
 
 // IRQs. interrupts = <0 0x84 4, 0 0x51 4, 0 0x19f 4, 0 0x1a0 4, 0 0x1a1 4, 0 0x56 4, 0 0x5e 4, 0 0x60 4,
 // 0 0x52 4, 0 0x77 4, 0 0x78 4, 0 0x57 4> (picasso.dts:7305). All are GIC_SPI, level high; these are the raw

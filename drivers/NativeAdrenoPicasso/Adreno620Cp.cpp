@@ -33,9 +33,11 @@
 #include "NativeAdrenoUserClient.h"
 #include "AdrenoPM4.h"
 #include "../NativeWlan/WlanBoard.h"
+#include "PicassoPil.h"
 #include <IOKit/IODeviceMemory.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IOLib.h>
+#include <IOKit/IOLocks.h>
 #include <IOKit/IOMemoryDescriptor.h>
 #include <IOKit/IOPlatformExpert.h>
 #include <IOKit/IOService.h>
@@ -941,7 +943,7 @@ unsigned rpmhVoteCryptoPath()
 
     auto sendBcm = [&](unsigned tcs, uint32_t address, uint32_t data) {
         const uint64_t tcsAt = tcsBase + uint64_t(layout.tcsStride) * tcs;
-        waitIdle(tcsAt);
+        if (!waitIdle(tcsAt)) return false;
         /* __tcs_set_trigger(false): clear the AMC trigger, then the mode. */
         uint32_t control = read32(rsc, tcsAt + layout.control);
         control &= ~kRscAmcModeTrigger;
@@ -971,6 +973,12 @@ unsigned rpmhVoteCryptoPath()
                 break;
             IODelay(10);
         }
+        const bool done = (irqStatus & (1u << tcs)) ||
+            (cmdStatus & kRscCmdStatusCompl);
+        if (!done) {
+            printf("PICASSO_GPU rpmh: tcs=%u timeout; command retained\n", tcs);
+            return false;
+        }
         write32(rsc, tcsBase + layout.irqClear, 1u << tcs);
         write32(rsc, tcsAt + layout.cmdEnable, 0);
         control = read32(rsc, tcsAt + layout.control);
@@ -979,8 +987,6 @@ unsigned rpmhVoteCryptoPath()
         control &= ~kRscAmcModeEnable;
         write32(rsc, tcsAt + layout.control, control);
         barrier();
-        const bool done = (irqStatus & (1u << tcs)) ||
-            (cmdStatus & kRscCmdStatusCompl);
         printf("PICASSO_GPU rpmh: tcs=%u irq=%08x status=%08x cmd-status=%08x "
                "spins=%u\n", tcs, irqStatus, status, cmdStatus, spins);
         return done;
@@ -1003,7 +1009,7 @@ unsigned rpmhVoteCryptoPath()
         printf("PICASSO_GPU rpmh: %s addr=%x unit=%u width=%u vcd=%u data=%08x tcs=%u done=%d\n",
             votes[index].name, bcm.address, bcm.unit, unsigned(bcm.width),
             unsigned(bcm.vcd), data, tcs, int(done));
-        ++voted;
+        if (done) ++voted;
     }
     write32(rsc, tcsBase + 0x00, irqEnable);
     barrier();
@@ -1141,6 +1147,8 @@ void heartbeatThread(void *, wait_result_t)
  * QCOM_SCM_INTERRUPTED (retry), as __scm_smc_do_quirk does. */
 bool loadZap()
 {
+    if (picasso_pil_lock()) return false;
+    struct PilUnlock { ~PilUnlock() { picasso_pil_unlock(); } } pilUnlock;
     /* wf116: vote the crypto engine's NoC path before TZ runs PAS, the way
      * subsys-pil-tz.c's scm_pas_enable_bw() does around every PAS call. */
     rpmhVoteCryptoPath();
@@ -2288,6 +2296,50 @@ bool acquireBuffers()
 }
 
 } // namespace
+
+/* The WLAN worker and GPU probe are independent threads. Publish one lazily
+ * allocated sleeping lock, rather than assuming their probe order serializes
+ * the later ZAP upload. */
+static IOLock *gPicassoPilLock;
+static bool gPicassoPilBlocked;
+extern "C" int picasso_pil_lock(void)
+{
+    IOLock *lock = __atomic_load_n(&gPicassoPilLock, __ATOMIC_ACQUIRE);
+    if (!lock) {
+        IOLock *candidate = IOLockAlloc();
+        if (!candidate) return -12;
+        IOLock *expected = nullptr;
+        if (!__atomic_compare_exchange_n(&gPicassoPilLock, &expected, candidate,
+                false, __ATOMIC_RELEASE, __ATOMIC_ACQUIRE)) {
+            IOLockFree(candidate);
+            lock = expected;
+        } else lock = candidate;
+    }
+    IOLockLock(lock);
+    if (gPicassoPilBlocked) { IOLockUnlock(lock); return -5; }
+    return 0;
+}
+extern "C" void picasso_pil_unlock(void) { IOLockUnlock(gPicassoPilLock); }
+extern "C" void picasso_pil_block_locked(void) { gPicassoPilBlocked = true; }
+extern "C" unsigned picasso_pil_crypto_locked(void) { return rpmhVoteCryptoPath(); }
+extern "C" struct picasso_pil_reply picasso_pil_call_locked(uint32_t function,
+    uint32_t info, uint64_t arg0, uint64_t arg1, uint64_t arg2)
+{
+    uint64_t pmr = 0, daif = 0;
+    __asm__ volatile("mrs %0, icc_pmr_el1" : "=r"(pmr));
+    __asm__ volatile("mrs %0, daif" : "=r"(daif));
+    __asm__ volatile("msr daifset, #2" ::: "memory");
+    __asm__ volatile("msr icc_pmr_el1, %0; isb" :: "r"(UINT64_C(0)) : "memory");
+    ScmReply result = scmSipCall(function, info, arg0, arg1, arg2);
+    __asm__ volatile("msr icc_pmr_el1, %0" :: "r"(pmr) : "memory");
+    __asm__ volatile("msr daif, %0; isb" :: "r"(daif) : "memory");
+    for (unsigned i = 1; result.a0 == 1 && i < 64; ++i) {
+        printf("PICASSO_WLAN pas interrupted fn=%x session=%llx attempt=%u\n",
+            function, (unsigned long long)result.a6, i);
+        result = scmSipCall(1u, info, arg0, arg1, arg2, 0, result.a6);
+    }
+    return {result.a0, result.a1, result.a6};
+}
 
 extern "C" int native_adreno620_cp_start(void)
 {

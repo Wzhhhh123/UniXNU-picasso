@@ -34,6 +34,7 @@ def main():
     if len(calls) != 1:
         raise ValueError('Expected exactly one production PAS resume call')
     call = calls[0].strip()
+    mpss_call = re.search(r'(?m)^\s*result = scmSipCall\(1u,[^;]+;', source).group().strip()
     modem_call = re.search(r'const ScmReply modem = scmSipCall\([^;]+;', source).group()
     fixture = '''#include <cassert>
 #include <cstdint>
@@ -58,6 +59,12 @@ int main() {
         assert(sent[5] == 0); // No fourth PAS argument / extended-argument pointer.
         assert(sent[6] == token); // ARM_SMCCC_QUIRK_QCOM_A6, all 64 bits.
         assert(reply.a0 == 0);
+        ScmReply result{1, 0, 0, 0, token};
+        const uint32_t info=arginfo;
+        MPSS_RESUME_CALL
+        assert(sent[0] == 1 && sent[1] == info && sent[2] == arg0);
+        assert(sent[3] == arg1 && sent[4] == arg2 && sent[5] == 0 && sent[6] == token);
+        assert(result.a0 == 0);
     }
     const uint32_t kStdSipSmc64 = 0x42000000u;
     MODEM_QUERY
@@ -66,7 +73,7 @@ int main() {
     puts("PASS: five interrupted-call tokens preserve x6 and the PAS arguments");
     puts("PASS: MPSS PAS query uses 4, not ADSP / remote PID 1");
 }
-'''.replace('SIGNATURE', signature).replace('CALL', call).replace('MODEM_QUERY', modem_call)
+'''.replace('SIGNATURE', signature).replace('MPSS_RESUME_CALL', mpss_call).replace('CALL', call).replace('MODEM_QUERY', modem_call)
     (out / 'ScmResume.cpp').write_text(fixture, encoding='utf-8')
     (out / 'ScmRaw.cpp').write_text('typedef unsigned int uint32_t;\ntypedef unsigned long long uint64_t;\n' + shim, encoding='utf-8')
     report = dict(source=str(args.source.resolve()), source_sha256=hashlib.sha256(source.encode()).hexdigest(),

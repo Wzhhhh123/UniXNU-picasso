@@ -12,6 +12,17 @@ extern "C" void SHA256_Init(SHA256_CTX *);
 extern "C" void SHA256_Update(SHA256_CTX *, const void *, size_t);
 extern "C" void SHA256_Final(uint8_t *, SHA256_CTX *);
 extern "C" bool PE_parse_boot_argn(const char *, void *, int);
+struct boot_args { uint64_t physBase; };
+struct pe_state { void *bootArgs; }; extern pe_state PE_state;
+typedef void *thread_t;
+typedef int wait_result_t;
+enum { KERN_SUCCESS = 0 };
+extern "C" int kernel_thread_start(void (*)(void *, wait_result_t), void *, thread_t *);
+extern "C" void thread_deallocate(thread_t);
+extern "C" void thread_terminate(thread_t);
+extern "C" thread_t current_thread(void);
+extern "C" void IODelay(unsigned);
+extern "C" void IOSleep(unsigned);
 class IOMemoryMap { public: uintptr_t getVirtualAddress(); };
 class IODeviceMemory {
 public:

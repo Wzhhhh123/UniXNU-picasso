@@ -9,6 +9,10 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[1]
 BASE = 'cd1066e703e7c023767dfa7be54d5e2109658087'
 ALLOWED = {
+    'drivers/NativeAdrenoPicasso/PicassoPil.h',
+    'drivers/NativeWlan/WlanPil.h', 'drivers/NativeWlan/WlanMpss.h',
+    'drivers/NativeWlan/WlanMpss.cpp', 'drivers/NativeWlan/Test/pil.cpp',
+    'scripts/build-arm-driver.py',
     '.github/workflows/compose-bootimg.yml',
     'drivers/NativeAdrenoPicasso/Adreno620Cp.cpp',
     'drivers/NativeWlan/WlanBoard.h', 'drivers/NativeWlan/WlanProbe.cpp',

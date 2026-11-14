@@ -7,8 +7,9 @@
 //   4  publish the transport conclusion (integrated SNOC/CE; no PCIe link training or SDIO enumeration exists)
 //   5  stop with the honest blocker: there is no Apple-side 802.11 stack for this Qualcomm CNSS/WCN part
 // Every stage reports through native_wlan_* globals and a PICASSO_WLAN line. All work is synchronous and bounded;
-// Legacy stages do not poll hardware. The separate wlan-fw-read=1 survey uses
-// bounded UFS reads and does not bring up a controller that is not already ready.
+// Legacy stages do not poll hardware. wlan-fw-read=1 inventories local firmware;
+// 2 additionally runs PAS init/setup and stages all parts, then shuts down;
+// 3 additionally authenticates/starts MPSS. WlanMpss owns the asynchronous loader.
 // Board constants and their sources are in WlanBoard.h; the pure parsers/state machines are in WlanFirmware.c.
 // SMEM/stage 1 have run on Picasso; see docs/picasso-wlan-bringup.md for evidence.
 #include <IOKit/IOLib.h>
@@ -18,6 +19,7 @@
 #include <pexpert/pexpert.h>
 #include <string.h>
 #include <libkern/crypto/sha2.h>
+#include "WlanMpss.h"
 extern "C" {
 #include "WlanBoard.h"
 #include "WlanFirmware.h"
@@ -67,7 +69,7 @@ static int firmwareRead(void *, uint64_t lba, uint32_t blocks, void *out) {
 }
 static void firmwareSurvey() {
     int enabled = 0;
-    if (!PE_parse_boot_argn("wlan-fw-read", &enabled, sizeof enabled) || enabled != 1) return;
+    if (!PE_parse_boot_argn("wlan-fw-read", &enabled, sizeof enabled) || enabled < 1 || enabled > 3) return;
     if (!native_ufs_modem_open || !native_ufs_modem_read) {
         printf("PICASSO_WLAN firmware error=-45 storage unavailable\n"); return;
     }
@@ -103,6 +105,7 @@ static void firmwareSurvey() {
         for (unsigned i = 0; i < 32; ++i) { hex[2*i] = digits[digest[i] >> 4]; hex[2*i+1] = digits[digest[i] & 15]; }
         hex[64] = 0;
         printf("PICASSO_WLAN firmware modem.mdt sha256=%s payload_bytes_unread=%llu\n", hex, (unsigned long long)payload);
+        if (enabled >= 2) native_wlan_mpss_start((unsigned)enabled, &gFirmwareFs, dir.cluster, &gModemImage);
     }
 }
 

@@ -78,6 +78,18 @@ def main():
         base = int(re.search(r'^#define WLAN_MPSS_BASE (0x[0-9a-f]+)ULL$', header, re.M)[1], 16)
         size = int(re.search(r'^#define WLAN_MPSS_SIZE (0x[0-9a-f]+)ULL$', header, re.M)[1], 16)
         assert region['reg'] == struct.pack('>QQ', base, size)
+        reserved = tree['/reserved-memory/reserved_pil_mem_region@8bc17400']
+        meta_base = int(re.search(r'^#define WLAN_MPSS_METADATA_BASE (0x[0-9a-f]+)ULL$', header, re.M)[1], 16)
+        meta_size = int(re.search(r'^#define WLAN_MPSS_METADATA_SIZE (0x[0-9a-f]+)ULL$', header, re.M)[1], 16)
+        rb, rs = struct.unpack('>QQ', reserved['reg'])
+        assert rb <= meta_base and meta_base + meta_size <= rb + rs
+        assert meta_base >= 0x8bc1a000 and meta_size >= 16384 and 'no-map' in reserved
+        qmp = tree['/soc/qcom,qmp-aop@c300000']
+        assert qmp['reg'] == struct.pack('>II', 0xc300000, 0x1000)
+        ipcc = tree['/soc/qcom,ipcc@408000']
+        assert ipcc['reg'] == struct.pack('>II', 0x408000, 0x1000)
+        assert qmp['mboxes'] == ipcc['phandle'] + struct.pack('>II', 0, 0)
+        assert modem['mboxes'] == qmp['phandle'] + struct.pack('>I', 0)
         reports.append(dict(file=name, sha256=hashlib.sha256(data).hexdigest(), modem_pas=declared,
                             adsp_pas=1, modem_base=base, modem_size=size))
     args.output.parent.mkdir(parents=True, exist_ok=True)

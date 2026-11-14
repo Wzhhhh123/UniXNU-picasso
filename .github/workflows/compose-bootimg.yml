@@ -382,7 +382,7 @@ jobs:
               sheng-dpu-scanout=2 sheng-gpu-perf-index=4 sheng-gpu-gl=1 glwait=0 glhooks=1 wifi=0 glh=1
           OWNER_TRUST="$PWD/inputs/gpu72/gpu-trust.bundle" \
             python3 scripts/build-wf-payload.py gpu72-wifi-scm inputs/gpu72/ngpu-addon-ios16-gl-gpu72.bin \
-              sheng-dpu-scanout=2 sheng-gpu-perf-index=4 sheng-gpu-gl=1 glwait=0 glhooks=1 wifi=0 wlan-fw-read=1
+              sheng-dpu-scanout=2 sheng-gpu-perf-index=4 sheng-gpu-gl=1 glwait=0 glhooks=1 wifi=0 wlan-fw-read=3
           python3 - <<'PY'
           import hashlib, json, os, subprocess
           from pathlib import Path
@@ -394,7 +394,7 @@ jobs:
               assert report['data_ramdisk_sha256'] == '4998d22158c808c90b53b7c1f8a30d021401017b2947b5df034ded70bd74cfba'
               assert len(report['kernel_args'].encode()) <= 1000
               assert ('glh=1' in report['kernel_args'].split()) == (tag == 'gpu72-glh')
-              assert ('wlan-fw-read=1' in report['kernel_args'].split()) == (tag == 'gpu72-wifi-scm')
+              assert ('wlan-fw-read=3' in report['kernel_args'].split()) == (tag == 'gpu72-wifi-scm')
               assert 'sheng-wlan=1' not in report['kernel_args'].split()
               print(tag, 'kernel=', kernel_hash, 'args=', len(report['kernel_args'].encode()))
           provenance = dict(source_baseline='1c9ebeb17577610ad620bb73941d27844dac0392',
