@@ -443,6 +443,9 @@ ScmReply scmSipCall(uint32_t function, uint32_t arginfo, uint64_t arg0,
 
 void scmProbe()
 {
+    // These STD queries also use SCM while the WLAN worker may be loading.
+    if (picasso_pil_lock()) return;
+    struct PilUnlock { ~PilUnlock() { picasso_pil_unlock(); } } pilUnlock;
     constexpr uint32_t kSipOwner = 2u;              /* ARM_SMCCC_OWNER_SIP */
     constexpr uint32_t kOwnerShift = 24;
     constexpr uint32_t kFastCall = 1u << 31;        /* ARM_SMCCC_FAST_CALL */

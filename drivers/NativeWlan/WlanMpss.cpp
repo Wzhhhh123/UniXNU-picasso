@@ -162,6 +162,10 @@ static int load() {
         printf("PICASSO_WLAN mpss resource=%s addr=%x vote=%u\n",names[i],resources[i].address,values[i]);
     }
     rc=wlan_pil_aop(&io,1);
+    printf("PICASSO_WLAN mpss qmp magic=%x version=%x remote=%x/%x local=%x/%x channel=%x/%x box=%x size=%x\n",
+        mmread(nullptr,1,0),mmread(nullptr,1,4),mmread(nullptr,1,0x0c),mmread(nullptr,1,0x10),
+        mmread(nullptr,1,0x24),mmread(nullptr,1,0x28),mmread(nullptr,1,0x2c),mmread(nullptr,1,0x30),
+        mmread(nullptr,1,0x38),mmread(nullptr,1,0x34));
     printf("PICASSO_WLAN mpss aop=on rc=%d\n",rc); if (rc) return rc;
     for (unsigned i=0;i<3 && !rc;++i) {
         rc=wlan_pil_vote(&io,resources[i].address,values[i]);

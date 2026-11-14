@@ -402,7 +402,8 @@ jobs:
                             kernel_sha256=kernel_hash, hardware_tested=False,
                             wifi_scm_fix=True, modem_pas_id=4,
                             wifi_firmware_readonly=True,
-                            note='gpu72 plus SCM fixes and read-only modem GPT/FAT/MDT inventory. No MPSS secure load or WLAN data path yet. Temporary fastboot boot images only.')
+                            mpss_secure_loader=True, mpss_test_stage=3,
+                            note='gpu72 plus SCM serialization and opt-in MPSS PAS loader. Firmware storage access is read-only; stage 3 writes reserved MPSS RAM and attempts authentication/start. WLAN data path is not implemented. Temporary fastboot boot images only.')
           Path('out/picasso/kernel/gpu72-provenance.json').write_text(json.dumps(provenance, indent=2) + '\n')
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
               summary.write('GPU72 source baseline: `1c9ebeb`, with WiFi/SCM fixes.\n\nKernel SHA256: `' + kernel_hash + '`\n\nImages: gpu72-gl, gpu72-glh, gpu72-wifi-scm. Original #481 Data seed retained. WiFi networking is not implemented; hardware test pending.\n')
