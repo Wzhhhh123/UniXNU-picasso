@@ -74,9 +74,11 @@
 +  // Picasso never replaces a nonempty store, even if a stale reset bootarg is supplied.
 +  static bool discardRequested() { return false; }
 +  static bool initializeBlankRequested() { uint32_t v=0; return PE_parse_boot_argn("picasso-data-init-blank", &v, sizeof v) && v==1; }
-+  static bool acceptsVolatileFallback(unsigned mode,persist::Open result,const persist::Overlay &candidate,unsigned gpt) {
-+    return mode==2 && result==persist::Open::Kept && candidate.header==1 &&
-+           candidate.scan==persist::BlankScan::Nonzero && !gpt;
++  static bool acceptsVolatileFallback(unsigned mode,persist::Open result,const persist::Overlay &candidate,
++                                      unsigned gpt,bool recordUnavailable=false) {
++    return mode==2 && !gpt &&
++           ((result==persist::Open::Kept && candidate.header==1 && candidate.scan==persist::BlankScan::Nonzero) ||
++            (recordUnavailable && result==persist::Open::Failed && candidate.header==-1));
 +  }
 +  uint8_t *allocateSparsePage() {
 +    if(volatileFallback && sparse.resident >= kVolatileResidentLimit)return nullptr;
@@ -85,7 +87,7 @@
 +  bool prepareVolatileFallback() {
 +    // Called under gate, before publication, only after a read-only refusal and
 +    // the second GPT check. Never switch a mounted/restored disk back to its seed.
-+    if (!isBig || big.bytes != (4ULL<<30) || big.resident > kVolatileResidentLimit ||
++    if (!isBig || (big.bytes != (4ULL<<30) && big.bytes != (20ULL<<30)) || big.resident > kVolatileResidentLimit ||
 +        direct || directFailed || online || stopping || sparse.pages) {
 +      IOLog("PICASSO_DATASTORE fallback-refused reason=state big=%u bytes=%llu resident=%llu direct=%u failed=%u online=%u stopping=%u sparse_pages=%u\n",
 +            isBig,big.bytes,big.resident,direct,directFailed,online,stopping,sparse.pages!=nullptr);
@@ -197,7 +199,7 @@
          native_data_persist_present = overlay.present;
          native_data_persist_gpt_after = native_ufs_store_gpt_check();
 +        if (native_data_persist_gpt_after) { directFailed=true; direct=false; persistFailed(); }
-+        if (acceptsVolatileFallback(mode,result,overlay,native_data_persist_gpt_after))
++        if (acceptsVolatileFallback(mode,result,overlay,native_data_persist_gpt_after,managed20 && !initPhase))
 +          prepareVolatileFallback();
 +        IOLog("PICASSO_DATASTORE ready=%u direct=%u volatile=%u failed=%u gpt_after=%u bytes=%llu\n",
 +              direct || volatileFallback,direct,volatileFallback,directFailed,native_data_persist_gpt_after,pages * 4096);
@@ -409,7 +411,7 @@
 +  // start() records the logical size before choosing SeedDisk or RamSparseDisk.
 +  // A matching size with no page table/resident pages is still unallocated.
 +  if (!table || disk.pages || (disk.bytes && disk.bytes != seed.bytes) || disk.resident || !seed.bytes ||
-+      (seed.bytes & 4095) || seed.bytes > (4ULL << 30) || seed.count > seed.capacity ||
++      (seed.bytes & 4095) || seed.bytes > (20ULL << 30) || seed.count > seed.capacity ||
 +      (seed.count && (!seed.index || !seed.page)) || seed.resident != seed.count*4096) return false;
 +  for (uint64_t k=0; k<seed.count; ++k)
 +    if (!seed.page[k] || seed.index[k] >= seed.bytes/4096 || (k && seed.index[k] <= seed.index[k-1])) return false;
