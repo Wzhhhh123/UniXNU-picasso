@@ -133,9 +133,28 @@
 +        // A 20 GiB replacement must first acquire its persistent one-time
 +        // journal. Complete journals allow resume only, never another reset.
 +        bool managed20 = pages == 5242880;
-+        int initPhase = managed20 && mode==2 && overlayBits && stage &&
-+                        &picasso_data_init_begin && &picasso_data_init_finish ?
-+                        picasso_data_init_begin(pages,seedHash) : 0;
++        int initPhase = 0;
++        if (managed20 && mode==2 && overlayBits && stage &&
++            &picasso_data_init_begin && &picasso_data_init_finish) {
++          // The UFS geometry can become visible before the separate record
++          // window accepts its first hostLogOpen. A single failed begin used
++          // to turn this harmless ordering race into an early Data panic.
++          // Retry only the begin probe; the journal remains the authority and
++          // every write is still gated by its existing checks.
++          for (unsigned attempt=0; attempt<120 && !initPhase; ++attempt) {
++            initPhase=picasso_data_init_begin(pages,seedHash);
++            if (initPhase) {
++              if (attempt) IOLog("PICASSO_DATA_INIT recovered retry=%u phase=%d\n",attempt,initPhase);
++              break;
++            }
++            if (attempt==0 || ((attempt+1)%10)==0)
++              IOLog("PICASSO_DATA_INIT retry=%u reason=record-window\n",attempt+1);
++            if (attempt+1<120) {
++              IOLockUnlock(gate); IOSleep(100); IOLockLock(gate);
++              if (stopping) break;
++            }
++          }
++        }
 +        persist::Open result = overlayBits && stage && (!managed20 || initPhase) ? overlay.open(ops, pages, seedHash, mode == 1, overlayBits, managed20 ? initPhase==1 : discardRequested(), !managed20 && mode == 2 && initializeBlankRequested(), stage, kStagePages)
                                                            : persist::Open::Failed;
 +        if(managed20 && (result==persist::Open::Fresh || result==persist::Open::Resumed) &&
