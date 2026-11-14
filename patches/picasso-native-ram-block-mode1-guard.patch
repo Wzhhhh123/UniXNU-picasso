@@ -58,7 +58,7 @@
 +    }
      bool write(uint64_t b, uint32_t n, const void *s) { return native_ufs_store_write(b, n, s); }
      bool sync() { return native_ufs_store_sync(); }
-@@ -75,14 +91,49 @@
+@@ -75,14 +91,51 @@
  public:
    // Called once, before the Data volume is mounted (native_ram_block_volume_seed): open the store window, put the pages that
 -  // earlier boots changed back into the sparse disk, and from then on write changed pages through. The seed identity
